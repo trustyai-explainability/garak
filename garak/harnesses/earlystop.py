@@ -51,7 +51,7 @@ class EarlyStopHarness(Harness):
         "compatible_probes": [
             "grandma.GrandmaIntent",
             "tap.TAPIntent",
-            "dan_intent.Dan_11_0_Intent",
+            "multilingual.TranslationIntent",
         ],
     }
     
