@@ -53,6 +53,9 @@ class EarlyStopHarness(Harness):
             "tap.TAPIntent",
             "multilingual.TranslationIntent",
             "spo.SPOIntent",
+            "spo.SPOIntentUserAugmented",
+            "spo.SPOIntentSystemAugmented",
+            "spo.SPOIntentBothAugmented",
         ],
     }
     
