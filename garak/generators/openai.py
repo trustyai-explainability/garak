@@ -21,7 +21,7 @@ import openai
 import backoff
 
 from garak import _config
-from garak.attempt import Message, Conversation
+from garak.attempt import Message, Conversation, tool_message_keys
 import garak.exception
 from garak.generators.base import Generator
 
@@ -240,6 +240,12 @@ class OpenAICompatible(Generator):
                     "role": turn.role,
                     "content": turn.content.text,
                 }
+                # re-attach tool-calling metadata stashed in Message.notes so tool
+                # turns (assistant tool_calls, tool-result turns) are sent as authored
+                notes = turn.content.notes or {}
+                for key in tool_message_keys:
+                    if key in notes:
+                        transformed_turn[key] = notes[key]
             turn_list.append(transformed_turn)
 
         return turn_list
@@ -313,6 +319,14 @@ class OpenAICompatible(Generator):
 
             create_args["messages"] = messages
 
+            # per-conversation tool definitions (and optional tool_choice) travel on
+            # Conversation.notes so each injected conversation carries its own schema
+            if isinstance(prompt, Conversation):
+                if prompt.notes.get("tools"):
+                    create_args["tools"] = prompt.notes["tools"]
+                if prompt.notes.get("tool_choice") is not None:
+                    create_args["tool_choice"] = prompt.notes["tool_choice"]
+
         try:
             response = generator.create(**create_args)
         except openai.BadRequestError as e:
@@ -347,9 +361,15 @@ class OpenAICompatible(Generator):
         if is_completion:
             reponse_message_list = [Message(c.text) for c in response.choices]
         else:
-            reponse_message_list = [
-                Message(c.message.content) for c in response.choices
-            ]
+            reponse_message_list = []
+            for c in response.choices:
+                notes = {}
+                # capture any tool calls the model emitted so detectors can inspect
+                # the payloads (mirrors OpenAIResponsesGenerator behaviour)
+                tool_calls = getattr(c.message, "tool_calls", None)
+                if tool_calls:
+                    notes["tool_calls"] = [tc.model_dump() for tc in tool_calls]
+                reponse_message_list.append(Message(c.message.content, notes=notes))
 
         if len(reponse_message_list) != generations_this_call:
             raise garak.exception.BadGeneratorException(
@@ -449,7 +469,15 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         "uri": None,
         "instructions": None,
         "tools": [],
-        "suppressed_params": {"n", "temperature", "top_p", "frequency_penalty", "presence_penalty", "seed", "stop"},
+        "suppressed_params": {
+            "n",
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "stop",
+        },
     }
 
     def _generator_is_valid(self) -> bool:
@@ -526,8 +554,14 @@ class OpenAIResponsesGenerator(OpenAICompatible):
         tool_calls = []
 
         _TOOL_CALL_ATTRS = (
-            "call_id", "name", "arguments", "input", "output",
-            "error", "status", "server_label",
+            "call_id",
+            "name",
+            "arguments",
+            "input",
+            "output",
+            "error",
+            "status",
+            "server_label",
         )
         for item in response.output:
             item_type = getattr(item, "type", None)
