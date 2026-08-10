@@ -39,6 +39,8 @@ class IndirectInjection(garak.probes.Probe):
     doc_uri = (
         "https://owasp.org/www-project-top-10-for-large-language-model-applications/"
     )
+    # instructions injected via other contexts (tool results, documents, ...)
+    intent = "T009indirect"
     active = False  # opt-in: requires an external conversation_source file
     tags = [
         "avid-effect:security:S0403",
