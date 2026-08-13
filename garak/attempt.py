@@ -15,7 +15,13 @@ from garak.exception import GarakException
     ATTEMPT_COMPLETE,
 ) = range(3)
 
-roles = {"system", "user", "assistant"}
+roles = {"system", "user", "assistant", "tool"}
+
+# OpenAI chat-completion keys that carry tool-calling metadata at the message level
+# (i.e. as siblings of `role`/`content`). These are stashed in `Message.notes` so the
+# Message dataclass schema stays unchanged, and re-emitted by generators that support
+# tool calling (see garak.generators.openai.OpenAICompatible._conversation_to_list).
+tool_message_keys = ("tool_calls", "tool_call_id", "name")
 
 
 @dataclass
@@ -106,13 +112,20 @@ class Turn:
         else:
             raise ValueError("Expected `role` in Turn dict")
         message = entity.pop("content", {})
-        if isinstance(message, str):
-            # legacy branch to handle fschat, 2025.12.05
-            # condition created from garak.resources.red_team.evaluation.EvaluationJudge._create_conv()
+        # tool-calling metadata (tool_calls / tool_call_id / name) rides alongside
+        # role/content in OpenAI messages; route it into Message.notes so tool turns
+        # round-trip without changing the Message schema.
+        tool_notes = {k: entity[k] for k in tool_message_keys if k in entity}
+        if message is None or isinstance(message, str):
+            # `content` may be None for assistant tool-call turns; str branch also
+            # handles the legacy fschat path, 2025.12.05, from
+            # garak.resources.red_team.evaluation.EvaluationJudge._create_conv()
             # relevant test is tests/detectors/test_detectors_judge.py::test_klass_detect
             content = Message(text=message)
         else:
             content = Message(**message)
+        if tool_notes:
+            content.notes.update(tool_notes)
         return cls(role=role, content=content)
 
 
