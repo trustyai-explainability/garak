@@ -155,8 +155,10 @@ def _init_populate_result_db(evals, taxonomy=None, report_plugin_cache=None):
     cursor.execute(create_table)
 
     for eval in evals:
+        if not eval["probe"].startswith("probes."):
+            continue
         eval["probe"] = eval["probe"].replace("probes.", "")
-        pm, pc = eval["probe"].split(".")
+        pm, pc = eval["probe"].split(".", 1)
         detector = eval["detector"].replace("detector.", "")
         passes = eval["passed"]
         instances = eval.get("total_evaluated", eval.get("total", None))
