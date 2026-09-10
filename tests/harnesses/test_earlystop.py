@@ -130,3 +130,24 @@ def test_run_writes_one_summary_per_source_stub(harness_env):
     hitlog_path = report_file.name.replace("report.jsonl", "report.hitlog.jsonl")
     assert Path(hitlog_path).exists(), "Accepted baseline outputs need hitlog records"
     assert len(Path(hitlog_path).read_text(encoding="utf-8").splitlines()) == 6
+
+
+def test_attack_probe_plugin_cache_entry(harness_env):
+    harness, evaluator, report_file = harness_env
+    generator = _plugins.load_plugin("generators.test.Repeat")
+
+    harness.run(
+        generator,
+        ["probes.multilingual.TranslationIntent"],
+        ["detectors.always.Pass"],
+        evaluator,
+    )
+    report_file.flush()
+    report_file.seek(0)
+    entries = [json.loads(line) for line in report_file]
+    cached = [entry for entry in entries if entry["entry_type"] == "plugin_cache"]
+    cached_plugins = {
+        name for entry in cached for name in entry["plugin_cache"].get("probes", {})
+    }
+
+    assert "probes.multilingual.TranslationIntent" in cached_plugins

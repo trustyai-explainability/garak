@@ -518,6 +518,7 @@ class EarlyStopHarness(Harness):
                 probe = self._load_probe(probe_name)
                 if probe is None:
                     continue
+                _emit_plugin_cache_entry(probe)
                 self._restrict_probe(probe, rejected_keys)
                 if not probe.prompts:
                     continue
