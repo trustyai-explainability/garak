@@ -69,6 +69,18 @@ def _resolve_plugin_paths(
     return names, rejected, inactive
 
 
+def _ordered_names(candidate: set, selectors: List[_spec.Selector], category: str):
+    """Keep explicit selector order while retaining deterministic family order."""
+    ordered = []
+    for selector in selectors:
+        names, _, _ = _resolve_plugin_paths([selector], category)
+        for name in sorted(names):
+            if name in candidate and name not in ordered:
+                ordered.append(name)
+    ordered.extend(name for name in sorted(candidate) if name not in ordered)
+    return ordered
+
+
 def _has_any_tag(name: str, prefixes: List[str]) -> bool:
     tags = _plugins.plugin_info(name).get("tags") or []
     return any(tag.startswith(prefix) for tag in tags for prefix in prefixes)
@@ -206,7 +218,10 @@ def resolve_spec(spec: _spec.Spec, skip_unknown: bool = False) -> _spec.Resoluti
     else:
         empty_reason = _empty_reason(spec)
     return _spec.Resolution(
-        selected={"probes": sorted(candidate), "buffs": sorted(buffs)},
+        selected={
+            "probes": _ordered_names(candidate, probe_includes, "probes"),
+            "buffs": _ordered_names(buffs, buff_includes, "buffs"),
+        },
         rejected=rejected,
         inactive=inactive_modules,
         empty_reason=empty_reason,

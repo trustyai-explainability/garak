@@ -98,7 +98,7 @@ def test_translation_intent_probe():
     )
 
     assert probe.target_lang == lang
-    assert _config.run.target_lang == lang
+    assert _config.run.target_lang == "en", "TranslationIntent must not change the run language"
 
     # Set up a temporary report file for the probe to write to
     with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8") as temp_report_file:

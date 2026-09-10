@@ -61,22 +61,8 @@ class TranslationIntent(SPOIntent):
     parallelisable_attempts = False  # This might cause OOM issues when loading up LocalHFTranslator multiple times
 
     def __init__(self, config_root=_config):
-        # We need to set target_lang in config BEFORE calling super().__init__()
-        # because the base Probe class creates langproviders during initialization
-        # Load config early to get target_lang from DEFAULT_PARAMS or user config
+        # Load the target language before Probe creates language providers.
         self._load_config(config_root)
-
-        # Now set the target language for the run
-        # Handle both dict config (from tests) and module config (from real runs)
-        if isinstance(config_root, dict):
-            # In test mode with dict config, use global _config
-            _config.run.target_lang = self.target_lang
-        else:
-            # In normal mode with module config
-            config_root.run.target_lang = self.target_lang
-
-        # Call SPOIntent.__init__ which loads DAN prompts and calls
-        # IntentProbe.__init__ → Probe.__init__ (creates langprovider)
         super().__init__(config_root=config_root)
 
         # Verify langproviders are configured
@@ -92,6 +78,16 @@ class TranslationIntent(SPOIntent):
                 f"Translation probe will not reverse-translate outputs. "
                 f"Please configure reverse langproviders in your config file."
             )
+
+    def _get_langprovider(self):
+        from garak.services.langservice import get_langprovider
+
+        return get_langprovider(self.lang, target=self.target_lang)
+
+    def _get_reverse_langprovider(self):
+        from garak.services.langservice import get_langprovider
+
+        return get_langprovider(self.lang, reverse=True, target=self.target_lang)
 
     def _postprocess_attempt(self, this_attempt) -> garak.attempt.Attempt:
         """Reverse-translate outputs back to source language.

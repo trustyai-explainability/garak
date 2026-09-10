@@ -102,12 +102,17 @@ def load():
     raise GarakException(msg)
 
 
-def get_langprovider(source: str, *, reverse: bool = False):
-    """Provides a singleton runtime language provider consumed in probes and detectors.
+def get_langprovider(
+    source: str, *, reverse: bool = False, target: str | None = None
+):
+    """Return a language provider for a source and optional target language.
 
-    returns a single direction langprovider for the `_config.run.target_lang` to encapsulate target language outside plugins
+    The run target language remains the default for existing probes.
+    A probe can pass a target to keep its language choice local to that probe.
     """
     load()
-    dest = _config.run.target_lang if hasattr(_config.run, "target_lang") else "en"
+    dest = target or (
+        _config.run.target_lang if hasattr(_config.run, "target_lang") else "en"
+    )
     key = f"{source},{dest}" if not reverse else f"{dest},{source}"
     return langproviders.get(key, native_langprovider)

@@ -64,6 +64,19 @@ def test_plugin_path_family_and_class():
     assert one == ["probes.dan.DanInTheWild"], "explicit class must resolve to itself"
 
 
+def test_explicit_probe_order_is_preserved():
+    spec = (
+        "probes.spo.SPOIntent,"
+        "probes.multilingual.TranslationIntent,"
+        "probes.spo.SPOIntentUserAugmented"
+    )
+    assert resolve(spec).probes == [
+        "probes.spo.SPOIntent",
+        "probes.multilingual.TranslationIntent",
+        "probes.spo.SPOIntentUserAugmented",
+    ], "explicit probe order must drive staged harness execution"
+
+
 # --- T2b: 'all' is an alias of '*' ----------------------------------------
 
 
