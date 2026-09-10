@@ -155,8 +155,16 @@ def _init_populate_result_db(evals, taxonomy=None, report_plugin_cache=None):
     cursor.execute(create_table)
 
     for eval in evals:
+        # The EarlyStopHarness writes a pipeline summary eval entry with the
+        # probe "garak.harnesses.earlystop.EarlyStopHarness" and the synthetic
+        # detector "EarlyStop". This is not a probe result and cannot be
+        # resolved as a probe, so skip it. Real probe entries use the short
+        # form "module.Class" (for example "dan.Dan_11_0") and never start
+        # with "garak.".
+        if eval["probe"].startswith("garak."):
+            continue
         eval["probe"] = eval["probe"].replace("probes.", "")
-        pm, pc = eval["probe"].split(".")
+        pm, pc = eval["probe"].split(".", 1)
         detector = eval["detector"].replace("detector.", "")
         passes = eval["passed"]
         instances = eval.get("total_evaluated", eval.get("total", None))
