@@ -73,7 +73,6 @@ class PackageHallucinationDetector(Detector, ABC):
                     dataset["text"], dataset["package_first_seen"]
                 ):
                     try:
-                        # python 3.10 does not accept TZ in iso format
                         iso_date_str = date_str[0:19]
                         first_seen = pytz.utc.localize(
                             datetime.fromisoformat(iso_date_str)
