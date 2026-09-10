@@ -1,6 +1,10 @@
 """Top-level package for garak"""
 
-__version__ = "0.17.0"
+try:
+    from ._version import __version__
+except ModuleNotFoundError:
+    # Use a development version when flit-scm has not generated the file.
+    __version__ = "0.0.0+dev"
 __app__ = "garak"
 __description__ = "LLM vulnerability scanner"
 

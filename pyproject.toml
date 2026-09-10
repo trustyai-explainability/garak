@@ -1,10 +1,10 @@
 [build-system]
-requires = ["flit_core >=3.11,<4"]
-build-backend = "flit_core.buildapi"
+requires = ["flit-scm>=1.7.0,<2"]
+build-backend = "flit_scm:buildapi"
 
 [project]
 name = "garak"
-version = "0.17.0"
+dynamic = ["version"]
 authors = [
   { name = "Leon Derczynski", email="lderczynski@nvidia.com" },
   { name = "Subho Majumdar", email="subho@vijil.ai" },
@@ -141,12 +141,11 @@ description = "LLM vulnerability scanner"
 readme = "README.md"
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "mikeshardmind-base2048>=1.0.2",
   "transformers>=5.14.1,<6.0",
@@ -248,6 +247,11 @@ exclude = [
   "tests/",
   "doc/source/html/",
 ]
+
+[tool.setuptools_scm]
+write_to = "garak/_version.py"
+local_scheme = "no-local-version"
+version_scheme = "no-guess-dev"
 
 [tool.black]
 line-length = 88
