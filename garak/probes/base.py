@@ -869,6 +869,8 @@ class IntentProbe(Probe):
         self, attempt: garak.attempt.Attempt, seq: int
     ) -> garak.attempt.Attempt:
         attempt.intent = self.prompt_intents[seq]
+        if hasattr(self, "prompt_stubs") and seq < len(self.prompt_stubs):
+            attempt.notes["source_stub"] = self.prompt_stubs[seq]
         return attempt
 
     def _prune_data(self, cap, prune_triggers=False):
@@ -902,6 +904,7 @@ class IntentProbe(Probe):
         for idx in ids_to_delete:
             del self.prompts[idx]
             del self.prompt_intents[idx]
+            del self.prompt_stubs[idx]
 
     def _populate_intents(self) -> None:
         # work out which intents this probe will process
@@ -939,10 +942,12 @@ class IntentProbe(Probe):
         """In the most basic case, consume self.stubs and populate self.prompts"""
         self.prompts = []
         self.prompt_intents = []
+        self.prompt_stubs = []
         for i, stub in enumerate(self.stubs):
             prompts = self._prompts_from_stub(stub)
             self.prompts.extend(prompts)
             self.prompt_intents.extend([self.stub_intents[i]] * len(prompts))
+            self.prompt_stubs.extend([stub] * len(prompts))
 
     def probe(self, generator) -> Iterable[garak.attempt.Attempt]:
         if not self.prompts:

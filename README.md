@@ -116,6 +116,34 @@ python -c "import garak; print(garak.__version__)"
 4. Use the complete version for reproducible installation.
 
 
+## Harness selection
+
+Normal scans use the standard harness path.
+
+Use `--harness earlystop` to select the adaptive EarlyStop harness.
+
+```bash
+garak --target_type openai \
+  --target_name gpt-5-nano \
+  --harness earlystop \
+  --spec "probes.grandma.GrandmaIntent,intent:S"
+```
+
+Set the same option in a YAML configuration file:
+
+```yaml
+run:
+  harness: earlystop
+  spec:
+    include:
+      - probes.grandma.GrandmaIntent
+      - intent: S
+```
+
+The EarlyStop harness runs only when `run.harness` is set to `earlystop`.
+The default value keeps normal `ProbewiseHarness` and `PxD` dispatch unchanged.
+
+
 ## Getting started
 
 The general syntax is:

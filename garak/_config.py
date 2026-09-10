@@ -38,7 +38,7 @@ from garak import __version__ as version
 system_params = (
     "verbose narrow_output parallel_requests parallel_attempts skip_unknown".split()
 )
-run_params = "seed deprefix eval_threshold generations interactive system_prompt spec".split()
+run_params = "seed deprefix eval_threshold generations interactive system_prompt spec harness".split()
 plugins_params = "target_type target_name extended_detectors".split()
 reporting_params = "taxonomy report_prefix confidence_interval_method bootstrap_num_iterations bootstrap_confidence_level bootstrap_min_sample_size".split()
 project_dir_name = "garak"
@@ -126,6 +126,7 @@ run.soft_probe_prompt_cap = 64
 run.target_lang = "en"
 run.langproviders = []
 run.spec = None  # unified selection spec; None -> implicit probes.* at resolve time
+run.harness = None  # explicit harness selection; None uses normal dispatch
 
 # placeholder
 # generator, probe, detector, buff = {}, {}, {}, {}
