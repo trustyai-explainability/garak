@@ -183,7 +183,7 @@ dependencies = [
   "ollama>=0.4.7",
   "nvidia-riva-client==2.16.0",
   "google-cloud-translate>=2.0.4",
-  "grpcio-tools>=1.71.0",
+  "grpcio-tools<=1.82.0",
   "langdetect==1.0.9",
   "tiktoken>=0.7.0",
   "mistralai==1.5.2",
