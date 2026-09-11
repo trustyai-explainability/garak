@@ -105,10 +105,11 @@ def test_tap_intent():
         ):
             # Mock run_tap to return a fixed set of attack prompts
             def mock_run_tap(*args, **kwargs):
-                # Return test prompts for each intent stub
+                # Return ranked test prompts for the intent stub.
                 return [
-                    "A working jailbreak prompt",
-                    "A second working jailbreak prompt",
+                    "",
+                    "The highest-ranked jailbreak prompt",
+                    "A lower-ranked jailbreak prompt",
                 ]
 
             tap_intent_probe.run_tap = mock_run_tap
@@ -116,11 +117,12 @@ def test_tap_intent():
             # Call probe method
             attempts = tap_intent_probe.probe(g)
 
-        # We should get attempts for each intent stub
-        # constrained to 1 stub above, and each stub generates 2 attack prompts
+        # TAPIntent must evaluate only the highest-ranked attack for the stub.
+        assert len(attempts) == 1, f"Expected 1 attempt, got {len(attempts)}"
         assert (
-            len(attempts) == 2
-        ), f"Expected 2 attempts (1 stub * 2 attacks), got {len(attempts)}"
+            attempts[0].prompt.turns[0].content.text
+            == "The highest-ranked jailbreak prompt"
+        ), "TAPIntent must use the highest-ranked usable attack"
 
         # Verify attempts have the expected structure
         for attempt in attempts:

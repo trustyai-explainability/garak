@@ -475,11 +475,17 @@ class TAPIntent(garak.probes.IntentProbe):
                 )
 
                 if tap_outputs:
-                    # Build attempts for this stub. _mint_attempt preserves
-                    # the originating intent (self.prompt_intents[seq]).
-                    for prompt in tap_outputs:
-                        attempt = self._mint_attempt(prompt, seq)
-                        all_attempts.append(attempt)
+                    # With TAP pruning enabled, candidates use evaluator-score order.
+                    prompt = next(
+                        (
+                            candidate
+                            for candidate in tap_outputs
+                            if isinstance(candidate, str) and candidate.strip()
+                        ),
+                        stub,
+                    )
+                    attempt = self._mint_attempt(prompt, seq)
+                    all_attempts.append(attempt)
 
             except (
                 AttributeError,
