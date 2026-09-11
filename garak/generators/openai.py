@@ -521,6 +521,12 @@ class OpenAIResponsesGenerator(OpenAICompatible):
     def _generator_is_valid(self) -> bool:
         return self.generator == self.client.responses
 
+    def _validate_uri_connectivity(self):
+        """Skip connectivity checks when the Responses API uses OpenAI defaults."""
+        if self.uri is None:
+            return
+        super()._validate_uri_connectivity()
+
     def _load_unsafe(self):
         kwargs = {"api_key": getattr(self, "api_key", None)}
         if getattr(self, "uri", None):

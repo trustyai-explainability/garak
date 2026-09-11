@@ -475,9 +475,8 @@ class TAPIntent(garak.probes.IntentProbe):
                 )
 
                 if tap_outputs:
-                    # Build attempts for this stub. _mint_attempt runs the
-                    # IntentProbe prestore hook, which stamps the originating
-                    # intent (self.prompt_intents[seq]) onto the attempt.
+                    # Build attempts for this stub. _mint_attempt preserves
+                    # the originating intent (self.prompt_intents[seq]).
                     for prompt in tap_outputs:
                         attempt = self._mint_attempt(prompt, seq)
                         all_attempts.append(attempt)
@@ -503,9 +502,10 @@ class TAPIntent(garak.probes.IntentProbe):
         for this_attempt in attempt_iterator:
             result = self._execute_attempt(this_attempt)
             processed_attempt = self._postprocess_attempt(result)
-            _config.transient.reportfile.write(
-                json.dumps(processed_attempt.as_dict()) + "\n"
-            )
+            if not getattr(self, "_defer_report", False):
+                _config.transient.reportfile.write(
+                    json.dumps(processed_attempt.as_dict()) + "\n"
+                )
             attempts_completed.append(processed_attempt)
 
         logging.debug(

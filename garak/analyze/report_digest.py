@@ -64,6 +64,7 @@ def _parse_report(reportfile: IO):
     init = {}
     plugin_cache = None
     probe_summaries = {}
+    harness_summaries = []
 
     for record in [json.loads(line.strip()) for line in reportfile if line.strip()]:
         if record["entry_type"] == "eval":
@@ -92,13 +93,26 @@ def _parse_report(reportfile: IO):
                 plugin_cache.setdefault(category, {}).update(entries)
         elif record["entry_type"] == "probe_summary":
             probe_summaries[record["probe"]] = record
+        elif record["entry_type"] in {
+            "harness_stub_summary",
+            "harness_summary",
+        }:
+            harness_summaries.append(record)
 
     if plugin_cache is None or len(plugin_cache) <= 0:
         from copy import deepcopy
 
         plugin_cache = deepcopy(garak._plugins.PluginCache.instance())
         plugin_cache["version"] = garak.__version__
-    return init, setup, payloads, evals, plugin_cache, probe_summaries
+    return (
+        init,
+        setup,
+        payloads,
+        evals,
+        plugin_cache,
+        probe_summaries,
+        harness_summaries,
+    )
 
 
 def _extract_to_probespec(setup: dict) -> str:
@@ -591,9 +605,15 @@ def build_digest(report_filename: str, config=_config):
     }
 
     with open(report_filename, "r", encoding="utf-8") as reportfile:
-        init, setup, payloads, evals, report_plugin_cache, probe_summaries = (
-            _parse_report(reportfile)
-        )
+        (
+            init,
+            setup,
+            payloads,
+            evals,
+            report_plugin_cache,
+            probe_summaries,
+            harness_summaries,
+        ) = _parse_report(reportfile)
 
     calibration = garak.analyze.calibration.Calibration()
     calibration_used = False
@@ -685,6 +705,21 @@ def build_digest(report_filename: str, config=_config):
     report_digest["technique_intent_matrix"] = _compute_technique_intent_matrix(
         evals, report_plugin_cache
     )
+
+    if harness_summaries:
+        report_digest["harness_summary"] = next(
+            (
+                record
+                for record in harness_summaries
+                if record.get("entry_type") == "harness_summary"
+            ),
+            None,
+        )
+        report_digest["harness_stub_summaries"] = [
+            record
+            for record in harness_summaries
+            if record.get("entry_type") == "harness_stub_summary"
+        ]
 
     return report_digest
 

@@ -83,6 +83,7 @@ def _make_response_with_reasoning(message_text: str, reasoning_text: str):
 # ── init & defaults ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.uri_connectivity
 def test_defaults(set_fake_env, mock_openai_client):
     gen = OpenAIResponsesGenerator(name="my-model")
     assert gen.name == "my-model"

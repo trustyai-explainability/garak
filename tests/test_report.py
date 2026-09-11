@@ -132,6 +132,69 @@ def test_get_evaluations_extracts_evaluations_and_scores(sample_report):
     assert r.scores.index.tolist() == r.evaluations["probe"].unique().tolist()
 
 
+def test_get_evaluations_uses_harness_summary(tmp_path):
+    report_file = tmp_path / "harness.report.jsonl"
+    records = [
+        {
+            "entry_type": "start_run setup",
+            "plugins.target_type": "test",
+            "plugins.target_name": "target",
+        },
+        {
+            "entry_type": "harness_stub_summary",
+            "harness": "harnesses.earlystop.EarlyStopHarness",
+            "intent": "T999test",
+            "source_stub": "a request",
+            "accepted": True,
+            "successful_probe": "baseline",
+        },
+        {
+            "entry_type": "harness_summary",
+            "harness": "harnesses.earlystop.EarlyStopHarness",
+            "total_stubs": 2,
+            "accepted_stubs": 1,
+            "rejected_stubs": 1,
+            "attack_success_rate": 0.5,
+        },
+    ]
+    report_file.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+
+    report = Report(report_location=str(report_file)).load().get_evaluations()
+
+    assert report.harness_summaries
+    assert report.evaluations.iloc[0]["probe"] == "harness_summary"
+    assert report.evaluations.iloc[0]["passed"] == 1
+    assert report.evaluations.iloc[0]["total_evaluated"] == 2
+
+
+def test_export_uses_harness_summary(tmp_path):
+    report_file = tmp_path / "harness.report.jsonl"
+    records = [
+        {
+            "entry_type": "start_run setup",
+            "plugins.target_type": "test",
+            "plugins.target_name": "target",
+        },
+        {
+            "entry_type": "harness_summary",
+            "harness": "harnesses.earlystop.EarlyStopHarness",
+            "total_stubs": 2,
+            "accepted_stubs": 1,
+            "rejected_stubs": 1,
+            "attack_success_rate": 0.5,
+        },
+    ]
+    report_file.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+
+    Report(report_location=str(report_file)).load().get_evaluations().export()
+
+    assert (tmp_path / "harness.avid.jsonl").exists()
+
+
 def test_get_evaluations_raises_error_when_no_evals(tmp_path):
     """Test get_evaluations raises ValueError when no evaluations exist"""
     report_file = tmp_path / "no_evals.report.jsonl"

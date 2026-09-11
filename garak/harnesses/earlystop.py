@@ -35,6 +35,7 @@ _DETECTOR_ERRORS = (
     ValueError,
     GarakException,
 )
+_PROBE_ERRORS = _DETECTOR_ERRORS + (ImportError,)
 _REPORT_LOCK = threading.Lock()
 
 
@@ -72,7 +73,7 @@ def _detectors_for(detectors, attempt: Attempt):
     return detectors
 
 
-def _write_success_hitlog(attempt: Attempt) -> None:
+def _write_success_hitlog(attempt: Attempt, probe_name: str = "baseline") -> None:
     if not attempt.outputs:
         return
     output = attempt.outputs[0]
@@ -86,51 +87,54 @@ def _write_success_hitlog(attempt: Attempt) -> None:
         )
     else:
         hitlog_path = report_path.with_suffix(".hitlog.jsonl")
-    if _config.transient.hitlogfile is None or _config.transient.hitlogfile.closed:
-        mode = "a" if hitlog_path.exists() else "w"
-        _config.transient.hitlogfile = open(
-            hitlog_path, mode, buffering=1, encoding="utf-8"
+    with _REPORT_LOCK:
+        if _config.transient.hitlogfile is None or _config.transient.hitlogfile.closed:
+            mode = "a" if hitlog_path.exists() else "w"
+            _config.transient.hitlogfile = open(
+                hitlog_path, mode, buffering=1, encoding="utf-8"
+            )
+        _config.transient.hitlogfile.write(
+            json.dumps(
+                {
+                    "goal": attempt.goal,
+                    "prompt": asdict(attempt.prompt),
+                    "output": asdict(output),
+                    "triggers": attempt.notes.get("triggers"),
+                    "score": 1.0,
+                    "run_id": str(_config.transient.run_id),
+                    "attempt_id": str(attempt.uuid),
+                    "attempt_seq": attempt.seq,
+                    "attempt_idx": 0,
+                    "generator": f"{_config.plugins.target_type} {_config.plugins.target_name}",
+                    "probe": probe_name,
+                    "detector": list(attempt.detector_results),
+                    "generations_per_prompt": _config.run.generations,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
         )
-    _config.transient.hitlogfile.write(
-        json.dumps(
-            {
-                "goal": attempt.goal,
-                "prompt": asdict(attempt.prompt),
-                "output": asdict(output),
-                "triggers": attempt.notes.get("triggers"),
-                "score": 1.0,
-                "run_id": str(_config.transient.run_id),
-                "attempt_id": str(attempt.uuid),
-                "attempt_seq": attempt.seq,
-                "attempt_idx": 0,
-                "generator": f"{_config.plugins.target_type} {_config.plugins.target_name}",
-                "probe": "baseline",
-                "detector": list(attempt.detector_results),
-                "generations_per_prompt": _config.run.generations,
-            },
-            ensure_ascii=False,
-        )
-        + "\n"
-    )
 
 
 def _detect_attempt(
     attempt: Attempt, detectors, evaluator: Evaluator, detector_locks=None
 ) -> bool:
-    """Return true when an attempt is rejected by at least one safe signal."""
+    """Return true when an attempt is rejected by at least one safe signal.
+
+    The harness records every detector result before it calculates consensus.
+    ``detector_locks`` remains accepted for callers from older integrations, but
+    detector calls do not use it because that would serialize requests.
+    """
+    del detector_locks
     outputs = attempt.outputs
-    if not outputs or any(output is None or not output.text for output in outputs):
+    if not detectors or not outputs:
         return True
 
+    rejected = any(output is None or not output.text for output in outputs)
     for detector in detectors:
         name = _detector_name(detector)
         try:
-            lock = detector_locks.get(id(detector)) if detector_locks else None
-            if lock is None:
-                scores = list(detector.detect(attempt))
-            else:
-                with lock:
-                    scores = list(detector.detect(attempt))
+            scores = list(detector.detect(attempt))
         except _DETECTOR_ERRORS as error:
             logging.error(
                 "Detector %s failed for attempt %s: %s", name, attempt.uuid, error
@@ -143,14 +147,15 @@ def _detect_attempt(
 
         for score in scores:
             if score is None:
-                return True
+                rejected = True
+                continue
             try:
                 if evaluator.test(float(score)):
-                    return True
+                    rejected = True
             except (TypeError, ValueError):
-                return True
+                rejected = True
 
-    return False
+    return rejected
 
 
 def _is_rejected(
@@ -180,12 +185,7 @@ def _update_attempt_status(
     accepted_attempts = list(previously_accepted)
     rejected_attempts = []
     results_by_stub: dict[tuple[str | None, str], list[bool]] = {}
-    detector_locks = {
-        id(detector): threading.Lock()
-        for attempt in attacked_attempts
-        for detector in _detectors_for(detectors, attempt)
-    }
-
+    accepted_attacks_by_stub: dict[tuple[str | None, str], list[Attempt]] = {}
     for attempt in attacked_attempts:
         stub = _source_stub(attempt)
         if stub is None:
@@ -212,29 +212,31 @@ def _update_attempt_status(
                     attempt,
                     selected,
                     evaluator,
-                    None,
-                    detector_locks,
-                ): stub
+                ): (attempt, stub)
                 for attempt, selected, stub in work
             }
             for future in as_completed(future_map):
-                stub = future_map[future]
+                attempt, stub = future_map[future]
                 try:
                     rejected = future.result()
                 except _DETECTOR_ERRORS as error:
                     logging.error("Detector stage failed: %s", error)
                     rejected = True
-                results_by_stub.setdefault(_stub_key(stub), []).append(rejected)
+                key = _stub_key(stub)
+                results_by_stub.setdefault(key, []).append(rejected)
+                if not rejected:
+                    accepted_attacks_by_stub.setdefault(key, []).append(attempt)
     else:
         for attempt, selected, stub in work:
-            results_by_stub.setdefault(_stub_key(stub), []).append(
-                _is_rejected(
-                    attempt,
-                    selected,
-                    evaluator,
-                    detector_locks=detector_locks,
-                )
+            rejected = _is_rejected(
+                attempt,
+                selected,
+                evaluator,
             )
+            key = _stub_key(stub)
+            results_by_stub.setdefault(key, []).append(rejected)
+            if not rejected:
+                accepted_attacks_by_stub.setdefault(key, []).append(attempt)
 
     for baseline in previously_rejected:
         stub = _source_stub(baseline)
@@ -242,6 +244,9 @@ def _update_attempt_status(
         results = results_by_stub.get(key, [])
         if results and not all(results):
             accepted_attempts.append(baseline)
+            successful_attempts = accepted_attacks_by_stub.get(key, [])
+            if successful_attempts:
+                baseline.conversations = deepcopy(successful_attempts[0].conversations)
         else:
             rejected_attempts.append(baseline)
 
@@ -285,13 +290,7 @@ class EarlyStopHarness(Harness):
     def _load_probe(self, probe_name: str) -> IntentProbe | None:
         try:
             probe = _plugins.load_plugin(probe_name, break_on_fail=False)
-        except (
-            ImportError,
-            AttributeError,
-            TypeError,
-            ValueError,
-            GarakException,
-        ) as error:
+        except _PROBE_ERRORS as error:
             logging.error("Failed to load %s: %s", probe_name, error)
             return None
         if not isinstance(probe, IntentProbe):
@@ -334,13 +333,33 @@ class EarlyStopHarness(Harness):
             probe._prune_data(probe.soft_probe_prompt_cap)
 
     @staticmethod
-    def _annotate_attempts(attempts: Iterable[Attempt]) -> list[Attempt]:
+    def _annotate_attempts(
+        attempts: Iterable[Attempt], source_stubs: list[Stub] | None = None
+    ) -> list[Attempt]:
         annotated = list(attempts)
         for attempt in annotated:
             stub = _source_stub(attempt)
+            if stub is None and source_stubs is not None:
+                seq = attempt.seq
+                if isinstance(seq, int) and 0 <= seq < len(source_stubs):
+                    stub = source_stubs[seq]
+                    attempt.notes["source_stub"] = stub
             if stub is not None:
                 attempt.notes["original_prompt"] = _stub_text(stub)
         return annotated
+
+    @staticmethod
+    def _run_probe(probe: IntentProbe, model) -> list[Attempt]:
+        """Run a probe without its own report write.
+
+        EarlyStop adds detector results before it writes an attempt record.
+        This prevents the probe and harness from writing the same attempt twice.
+        """
+        probe._defer_report = True
+        try:
+            return list(probe.probe(model))
+        finally:
+            probe._defer_report = False
 
     @staticmethod
     def _write_completed_attempts(attempts: Iterable[Attempt]) -> None:
@@ -350,6 +369,22 @@ class EarlyStopHarness(Harness):
                 _config.transient.reportfile.write(
                     json.dumps(attempt.as_dict(), ensure_ascii=False) + "\n"
                 )
+
+    @staticmethod
+    def _record_stage_successes(states, attempts, outcomes, probe_name):
+        for attempt in attempts:
+            if outcomes.get(id(attempt), True):
+                continue
+            stub = _source_stub(attempt)
+            if stub is None:
+                continue
+            state = states.get(_stub_key(stub))
+            if state is None or state["accepted"]:
+                continue
+            state["accepted"] = True
+            state["successful_probe"] = probe_name
+            state["successful_attempt"] = deepcopy(attempt)
+            _write_success_hitlog(state["successful_attempt"], probe_name)
 
     @staticmethod
     def _load_detector_map(detector_names, stubs: list[Stub]):
@@ -378,14 +413,12 @@ class EarlyStopHarness(Harness):
             detector_map[intent] = loaded
         return detector_map, list(all_detectors.values())
 
-    def _classify_attempts(self, attempts, detector_map, evaluator, evaluate=True):
-        attempts = self._annotate_attempts(attempts)
+    def _classify_attempts(
+        self, attempts, detector_map, evaluator, evaluate=True, source_stubs=None
+    ):
+        del evaluate
+        attempts = self._annotate_attempts(attempts, source_stubs)
         outcomes = {}
-        detector_locks = {
-            id(detector): threading.Lock()
-            for detectors in detector_map.values()
-            for detector in detectors
-        }
         parallel_attempts = getattr(_config.system, "parallel_attempts", False)
         use_parallel = (
             isinstance(parallel_attempts, int)
@@ -406,7 +439,6 @@ class EarlyStopHarness(Harness):
                         attempt,
                         detector_map.get(attempt.intent, []),
                         evaluator,
-                        detector_locks,
                     ): attempt
                     for attempt in attempts
                 }
@@ -423,11 +455,8 @@ class EarlyStopHarness(Harness):
                     attempt,
                     detector_map.get(attempt.intent, []),
                     evaluator,
-                    detector_locks,
                 )
 
-        if attempts and evaluate:
-            evaluator.evaluate(attempts)
         if attempts:
             self._write_completed_attempts(attempts)
         return attempts, outcomes
@@ -481,7 +510,9 @@ class EarlyStopHarness(Harness):
 
             detector_map, all_detectors = self._load_detector_map(detector_names, stubs)
             if not all_detectors:
-                raise ValueError("No detectors loaded for EarlyStop")
+                logging.error(
+                    "No detectors loaded for EarlyStop; all attempts fail closed"
+                )
 
             self._emit_plugin_cache(model, all_detectors)
             states = {
@@ -495,18 +526,20 @@ class EarlyStopHarness(Harness):
             }
 
             baseline_probe = self._make_baseline_probe(stubs)
-            baseline_attempts = list(baseline_probe.probe(model))
+            try:
+                baseline_attempts = self._run_probe(baseline_probe, model)
+            except _PROBE_ERRORS as error:
+                logging.error("Baseline probe failed: %s", error)
+                baseline_attempts = []
             baseline_attempts, baseline_outcomes = self._classify_attempts(
-                baseline_attempts, detector_map, evaluator, evaluate=False
+                baseline_attempts,
+                detector_map,
+                evaluator,
+                source_stubs=baseline_probe.prompt_stubs,
             )
-            for attempt in baseline_attempts:
-                stub = _source_stub(attempt)
-                if stub is not None and not baseline_outcomes[id(attempt)]:
-                    state = states[_stub_key(stub)]
-                    state["accepted"] = True
-                    state["successful_probe"] = "baseline"
-                    state["successful_attempt"] = deepcopy(attempt)
-                    _write_success_hitlog(attempt)
+            self._record_stage_successes(
+                states, baseline_attempts, baseline_outcomes, "baseline"
+            )
 
             for probe_name in probe_names:
                 rejected_keys = {
@@ -523,18 +556,18 @@ class EarlyStopHarness(Harness):
                 if not probe.prompts:
                     continue
 
-                attempts = list(probe.probe(model))
+                try:
+                    attempts = self._run_probe(probe, model)
+                except _PROBE_ERRORS as error:
+                    logging.error("Attack probe %s failed: %s", probe_name, error)
+                    continue
                 attempts, outcomes = self._classify_attempts(
-                    attempts, detector_map, evaluator
+                    attempts,
+                    detector_map,
+                    evaluator,
+                    source_stubs=probe.prompt_stubs,
                 )
-                for attempt in attempts:
-                    stub = _source_stub(attempt)
-                    if stub is not None and not outcomes[id(attempt)]:
-                        state = states.get(_stub_key(stub))
-                        if state is not None and not state["accepted"]:
-                            state["accepted"] = True
-                            state["successful_probe"] = probe_name
-                            state["successful_attempt"] = deepcopy(attempt)
+                self._record_stage_successes(states, attempts, outcomes, probe_name)
 
             accepted_count = sum(1 for state in states.values() if state["accepted"])
             self._write_summaries(states, accepted_count, len(states))

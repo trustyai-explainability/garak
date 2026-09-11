@@ -348,10 +348,11 @@ class Probe(Configurable):
                 ):
                     processed_attempt = self._postprocess_attempt(result)
 
-                    _config.transient.reportfile.write(
-                        json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
-                        + "\n"
-                    )
+                    if not getattr(self, "_defer_report", False):
+                        _config.transient.reportfile.write(
+                            json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
+                            + "\n"
+                        )
                     attempts_completed.append(
                         processed_attempt
                     )  # these can be out of original order
@@ -375,9 +376,11 @@ class Probe(Configurable):
                 result = self._execute_attempt(this_attempt)
                 processed_attempt = self._postprocess_attempt(result)
 
-                _config.transient.reportfile.write(
-                    json.dumps(processed_attempt.as_dict(), ensure_ascii=False) + "\n"
-                )
+                if not getattr(self, "_defer_report", False):
+                    _config.transient.reportfile.write(
+                        json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
+                        + "\n"
+                    )
                 attempts_completed.append(processed_attempt)
 
         return attempts_completed
@@ -869,8 +872,6 @@ class IntentProbe(Probe):
         self, attempt: garak.attempt.Attempt, seq: int
     ) -> garak.attempt.Attempt:
         attempt.intent = self.prompt_intents[seq]
-        if hasattr(self, "prompt_stubs") and seq < len(self.prompt_stubs):
-            attempt.notes["source_stub"] = self.prompt_stubs[seq]
         return attempt
 
     def _prune_data(self, cap, prune_triggers=False):

@@ -3,14 +3,21 @@
 
 import json
 from pathlib import Path
+import threading
+import time
 from unittest.mock import Mock
 
 import pytest
 
 from garak import _config, _plugins, evaluators
 from garak.attempt import ATTEMPT_STARTED, Attempt, Conversation, Message, Turn
-from garak.harnesses.earlystop import EarlyStopHarness, _is_rejected
+from garak.harnesses.earlystop import (
+    EarlyStopHarness,
+    _detect_attempt,
+    _is_rejected,
+)
 from garak.intents import TextStub
+from garak.probes.base import IntentProbe
 
 
 def _attempt(stub, output="response"):
@@ -40,6 +47,41 @@ def harness_env(tmp_path):
     evaluator = evaluators.ThresholdEvaluator()
     yield harness, evaluator, report_file
     report_file.close()
+
+
+def test_intent_probe_does_not_attach_earlystop_metadata(harness_env):
+    probe = IntentProbe.__new__(IntentProbe)
+    probe.prompt_intents = ["T999test"]
+    probe.prompt_stubs = [TextStub("T999test", "source")]
+    attempt = Attempt(prompt=Conversation([Turn("user", Message("source"))]), notes={})
+
+    probe._attempt_prestore_hook(attempt, 0)
+
+    assert "source_stub" not in attempt.notes
+
+
+def test_empty_detector_list_fails_closed(harness_env):
+    _, evaluator, _ = harness_env
+    attempt = _attempt(TextStub("T999test", "original request"))
+
+    assert _detect_attempt(attempt, [], evaluator), "No detector must reject an attempt"
+
+
+def test_all_detectors_run_before_consensus(harness_env):
+    _, evaluator, _ = harness_env
+    first = Mock()
+    first.detectorname = "test.First"
+    first.detect.return_value = [0.0]
+    second = Mock()
+    second.detectorname = "test.Second"
+    second.detect.return_value = [1.0]
+    attempt = _attempt(TextStub("T999test", "original request"))
+
+    rejected = _detect_attempt(attempt, [first, second], evaluator)
+
+    assert rejected, "One safe detector result must reject the attempt"
+    assert first.detect.called and second.detect.called, "Every detector must run"
+    assert set(attempt.detector_results) == {"test.First", "test.Second"}
 
 
 def test_original_prompt_exists_before_detector(harness_env):
@@ -91,6 +133,35 @@ def test_string_source_stub_fails_closed(harness_env):
     assert len(rejected) == 1, "Unlinked attacks must leave the stub rejected"
 
 
+def test_parallel_detector_calls_overlap(harness_env):
+    harness, evaluator, _ = harness_env
+    state = {"active": 0, "maximum": 0}
+    state_lock = threading.Lock()
+
+    class ConcurrentDetector:
+        detectorname = "test.Concurrent"
+
+        def detect(self, attempt):
+            with state_lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            time.sleep(0.02)
+            with state_lock:
+                state["active"] -= 1
+            return [0.0]
+
+    stubs = [TextStub("T999test", f"request {index}") for index in range(4)]
+    baselines = [_attempt(stub, output=None) for stub in stubs]
+    attacks = [_attempt(TextStub(stub.intent, stub.content)) for stub in stubs]
+    _config.system.parallel_attempts = 4
+
+    harness._update_attempt_status(
+        attacks, [], baselines, [ConcurrentDetector()], evaluator
+    )
+
+    assert state["maximum"] > 1, "Parallel detector requests must overlap"
+
+
 def test_parallel_status_matches_sequential(harness_env):
     harness, evaluator, _ = harness_env
     detector = _plugins.load_plugin("detectors.always.Fail", break_on_fail=False)
@@ -109,6 +180,27 @@ def test_parallel_status_matches_sequential(harness_env):
     assert not rejected, "Parallel status must match sequential status"
 
 
+def test_rejected_consensus_does_not_write_hitlog(harness_env):
+    harness, evaluator, report_file = harness_env
+    first = Mock()
+    first.detectorname = "test.First"
+    first.detect.return_value = [1.0]
+    second = Mock()
+    second.detectorname = "test.Second"
+    second.detect.return_value = [0.0]
+    attempt = _attempt(TextStub("T999test", "original request"))
+
+    harness._classify_attempts(
+        [attempt],
+        {"T999test": [first, second]},
+        evaluator,
+    )
+    report_file.flush()
+
+    hitlog_path = report_file.name.replace("report.jsonl", "report.hitlog.jsonl")
+    assert not Path(hitlog_path).exists(), "Rejected consensus must not create a hitlog"
+
+
 def test_run_writes_one_summary_per_source_stub(harness_env):
     harness, evaluator, report_file = harness_env
     generator = _plugins.load_plugin("generators.test.Repeat")
@@ -121,8 +213,10 @@ def test_run_writes_one_summary_per_source_stub(harness_env):
     summaries = [
         entry for entry in entries if entry["entry_type"] == "harness_stub_summary"
     ]
+    attempts = [entry for entry in entries if entry["entry_type"] == "attempt"]
     aggregate = [entry for entry in entries if entry["entry_type"] == "harness_summary"]
     assert len(summaries) == 6, "Each text source stub needs one final summary"
+    assert len(attempts) == 6, "Each baseline attempt must appear once in the report"
     assert len(aggregate) == 1, "The harness needs one aggregate summary"
     assert aggregate[0]["accepted_stubs"] == 6
     assert aggregate[0]["attack_success_rate"] == 1.0
