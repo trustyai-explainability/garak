@@ -42,6 +42,7 @@ class Report:
         self.metadata = metadata
         self.evaluations = evaluations
         self.scores = scores
+        self.harness_summaries = []
 
         if self.records is None:
             self.records = []
@@ -57,23 +58,58 @@ class Report:
     def get_evaluations(self):
         """Extracts evaluation information from a garak report."""
         evals = []
+        harness_records = []
 
         for record in self.records:
-            if record["entry_type"] == "eval":
+            entry_type = record.get("entry_type")
+            if entry_type == "eval":
                 evals.append(record)
-            elif record["entry_type"] == "start_run setup":
+            elif entry_type == "start_run setup":
                 self.metadata = record
+            elif entry_type in {"harness_stub_summary", "harness_summary"}:
+                harness_records.append(record)
+
+        self.harness_summaries = harness_records
+        if len(evals) == 0:
+            summary = next(
+                (
+                    record
+                    for record in harness_records
+                    if record.get("entry_type") == "harness_summary"
+                ),
+                None,
+            )
+            if summary is not None:
+                evals.append(
+                    {
+                        "entry_type": "eval",
+                        "probe": "harness_summary",
+                        "detector": "attack_success_rate",
+                        "passed": summary.get("rejected_stubs", 0),
+                        "fails": summary.get("accepted_stubs", 0),
+                        "nones": 0,
+                        "total_evaluated": summary.get("total_stubs", 0),
+                        "total_processed": summary.get("total_stubs", 0),
+                        "probe_tags": [],
+                        "harness": summary.get("harness"),
+                        "attack_success_rate": summary.get("attack_success_rate"),
+                    }
+                )
+
         if len(evals) == 0:
             raise ValueError("No evaluations to report 🤷")
 
         # preprocess
-        for i in range(len(evals)):
-            module_name, plugin_class_name = evals[i]["probe"].split(".")
+        for evaluation in evals:
+            if evaluation["probe"] == "harness_summary":
+                evaluation["probe_tags"] = []
+                continue
+            module_name, plugin_class_name = evaluation["probe"].split(".")
             mod = importlib.import_module(f"garak.probes.{module_name}")
 
-            evals[i]["probe"] = f"{module_name}.{plugin_class_name}"
+            evaluation["probe"] = f"{module_name}.{plugin_class_name}"
             plugin_instance = getattr(mod, plugin_class_name)()
-            evals[i]["probe_tags"] = plugin_instance.tags
+            evaluation["probe_tags"] = plugin_instance.tags
 
         self.evaluations = pd.DataFrame.from_dict(evals)
         self.evaluations["score"] = np.where(
@@ -118,13 +154,26 @@ class Report:
             )  # replaced copy() with model_copy() to avoid deprecation warning
             probe_data = self.evaluations.query(f"probe=='{probe}'")
 
-            description_value = f"A model was evaluated by the Garak LLM Vulnerability scanner using the probe `{probe}`."
+            if probe == "harness_summary":
+                description_value = (
+                    "A model was evaluated by the Garak LLM Vulnerability scanner "
+                    "using the adaptive harness summary."
+                )
+            else:
+                description_value = f"A model was evaluated by the Garak LLM Vulnerability scanner using the probe `{probe}`."
             if self.metadata is not None:
                 target_type = self.metadata.get("plugins.target_type")
                 target_name = self.metadata.get("plugins.target_name")
 
                 if target_name and target_type:
-                    description_value = f"The model {target_name} from {target_type} was evaluated by the Garak LLM Vulnerability scanner using the probe `{probe}`."
+                    if probe == "harness_summary":
+                        description_value = (
+                            f"The model {target_name} from {target_type} was evaluated "
+                            "by the Garak LLM Vulnerability scanner using the adaptive "
+                            "harness summary."
+                        )
+                    else:
+                        description_value = f"The model {target_name} from {target_type} was evaluated by the Garak LLM Vulnerability scanner using the probe `{probe}`."
 
             report.description = ac.LangValue(
                 lang="eng",

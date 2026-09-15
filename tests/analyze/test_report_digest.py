@@ -25,6 +25,45 @@ def _write_report_with_eval(tmp_path, eval_entry):
     return str(report_path)
 
 
+def test_build_digest_consumes_harness_summaries(tmp_path) -> None:
+    _config.load_base_config()
+    _config.reporting.taxonomy = None
+    report_path = tmp_path / "earlystop.report.jsonl"
+    with open("tests/_assets/analyze/test.report.jsonl", encoding="utf-8") as source:
+        setup_line = source.readline()
+        init_line = source.readline()
+    records = [
+        {
+            "entry_type": "harness_stub_summary",
+            "harness": "harnesses.earlystop.EarlyStopHarness",
+            "intent": "T999test",
+            "source_stub": "a request",
+            "accepted": True,
+            "successful_probe": "baseline",
+        },
+        {
+            "entry_type": "harness_summary",
+            "harness": "harnesses.earlystop.EarlyStopHarness",
+            "total_stubs": 1,
+            "accepted_stubs": 1,
+            "rejected_stubs": 0,
+            "attack_success_rate": 1.0,
+            "future_field": "ignored by the parser",
+        },
+    ]
+    with report_path.open("w", encoding="utf-8") as report:
+        report.write(setup_line)
+        report.write(init_line)
+        for record in records:
+            report.write(json.dumps(record) + "\n")
+
+    digest = garak.analyze.report_digest.build_digest(str(report_path))
+
+    assert digest["eval"] == {}
+    assert digest["harness_summary"]["accepted_stubs"] == 1
+    assert len(digest["harness_stub_summaries"]) == 1
+
+
 def test_build_digest_raises_on_unknown_probe(tmp_path) -> None:
     _config.load_base_config()
     _config.reporting.taxonomy = "owasp"

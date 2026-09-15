@@ -348,10 +348,11 @@ class Probe(Configurable):
                 ):
                     processed_attempt = self._postprocess_attempt(result)
 
-                    _config.transient.reportfile.write(
-                        json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
-                        + "\n"
-                    )
+                    if not getattr(self, "_defer_report", False):
+                        _config.transient.reportfile.write(
+                            json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
+                            + "\n"
+                        )
                     attempts_completed.append(
                         processed_attempt
                     )  # these can be out of original order
@@ -375,9 +376,11 @@ class Probe(Configurable):
                 result = self._execute_attempt(this_attempt)
                 processed_attempt = self._postprocess_attempt(result)
 
-                _config.transient.reportfile.write(
-                    json.dumps(processed_attempt.as_dict(), ensure_ascii=False) + "\n"
-                )
+                if not getattr(self, "_defer_report", False):
+                    _config.transient.reportfile.write(
+                        json.dumps(processed_attempt.as_dict(), ensure_ascii=False)
+                        + "\n"
+                    )
                 attempts_completed.append(processed_attempt)
 
         return attempts_completed
@@ -902,6 +905,7 @@ class IntentProbe(Probe):
         for idx in ids_to_delete:
             del self.prompts[idx]
             del self.prompt_intents[idx]
+            del self.prompt_stubs[idx]
 
     def _populate_intents(self) -> None:
         # work out which intents this probe will process
@@ -939,10 +943,12 @@ class IntentProbe(Probe):
         """In the most basic case, consume self.stubs and populate self.prompts"""
         self.prompts = []
         self.prompt_intents = []
+        self.prompt_stubs = []
         for i, stub in enumerate(self.stubs):
             prompts = self._prompts_from_stub(stub)
             self.prompts.extend(prompts)
             self.prompt_intents.extend([self.stub_intents[i]] * len(prompts))
+            self.prompt_stubs.extend([stub] * len(prompts))
 
     def probe(self, generator) -> Iterable[garak.attempt.Attempt]:
         if not self.prompts:

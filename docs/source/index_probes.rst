@@ -39,6 +39,7 @@ For a guide to writing probes, see :doc:`extending.probe`.
    probes/lmrc
    probes/malwaregen
    probes/misleading
+   probes/multilingual
    probes/packagehallucination
    probes/phrasing
    probes/promptinject
@@ -49,6 +50,8 @@ For a guide to writing probes, see :doc:`extending.probe`.
    probes/smuggling
    probes/suffix
    probes/sysprompt_extraction
+   probes/spo
+   probes/_augmentation
    probes/tap
    probes/test
    probes/topic

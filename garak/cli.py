@@ -137,6 +137,12 @@ def main(arguments=None) -> None:
     parser.add_argument(
         "--config", type=str, default=None, help="YAML or JSON config file for this run"
     )
+    parser.add_argument(
+        "--harness",
+        type=str,
+        default=_config.run.harness,
+        help="opt into a harness, for example 'earlystop'",
+    )
 
     ## PLUGINS
     # generators
@@ -755,12 +761,29 @@ def main(arguments=None) -> None:
                     logging=logging,
                 )
 
+            if _config.run.harness and _config.plugins.detector_spec not in (
+                None,
+                "",
+                "auto",
+            ):
+                _config.run.serve_detectorless_intents = True
+
             command.start_run()  # start the run now that all config validation is complete
             print(f"📜 reporting to {_config.transient.report_filename}")
 
-            command.warn_unconsumed_intents(parsed_specs["probe"])
+            if not _config.run.harness:
+                command.warn_unconsumed_intents(parsed_specs["probe"])
 
-            if parsed_specs["detector"] == []:
+            if _config.run.harness:
+                command.harness_run(
+                    _config.run.harness,
+                    generator,
+                    parsed_specs["probe"],
+                    parsed_specs["detector"],
+                    evaluator,
+                    parsed_specs["buff"],
+                )
+            elif parsed_specs["detector"] == []:
                 command.probewise_run(
                     generator, parsed_specs["probe"], evaluator, parsed_specs["buff"]
                 )

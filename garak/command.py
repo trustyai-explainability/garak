@@ -370,6 +370,47 @@ def warn_unconsumed_intents(probe_names) -> None:
     print(f"⚠️  {msg}")
 
 
+EARLY_STOP_HARNESS = "harnesses.earlystop.EarlyStopHarness"
+
+
+def resolve_harness_name(harness_name):
+    """Resolve the public harness name to its plugin path."""
+    if harness_name is None or str(harness_name).strip() == "":
+        return None
+
+    normalized = str(harness_name).strip().lower()
+    if normalized in {
+        "earlystop",
+        "early-stop",
+        "early_stop",
+        EARLY_STOP_HARNESS.lower(),
+    }:
+        return EARLY_STOP_HARNESS
+
+    raise ValueError(
+        f"Unknown harness {harness_name!r}. Use 'earlystop' or leave the option empty."
+    )
+
+
+def harness_run(harness_name, generator, probe_names, detector_names, evaluator, buffs):
+    """Run an explicitly selected harness."""
+    resolved_name = resolve_harness_name(harness_name)
+    if resolved_name == EARLY_STOP_HARNESS:
+        import garak.harnesses.earlystop
+
+        early_stop_h = garak.harnesses.earlystop.EarlyStopHarness()
+        early_stop_h.run(
+            generator,
+            probe_names,
+            detector_names,
+            evaluator,
+            buffs,
+        )
+        return
+
+    raise ValueError(f"Harness {harness_name!r} is not available")
+
+
 # do a run
 def probewise_run(generator, probe_names, evaluator, buffs):
     import garak.harnesses.probewise

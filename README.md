@@ -84,6 +84,66 @@ git remote set-url origin https://github.com/NVIDIA/garak.git
 ```
 
 
+## Versioning
+
+This project uses the RHEL AI midstream version pattern:
+
+```
+$version+rhaiv.$build
+```
+
+The base version follows semantic versioning. The `rhaiv` marker identifies a RHEL AI build.
+The build number increments for downstream releases.
+
+| Version | Description |
+|---------|-------------|
+| `0.17.0+rhaiv.1` | First downstream release from upstream `0.17.0` |
+| `0.17.0+rhaiv.2` | Second downstream release from upstream `0.17.0` |
+| `0.18.0+rhaiv.1` | First downstream release from upstream `0.18.0` |
+
+### Install a specific version
+
+```bash
+pip install garak==0.17.0+rhaiv.1
+python -c "import garak; print(garak.__version__)"
+```
+
+### Version progression
+
+1. Keep release tags unchanged after publication.
+2. Increment the build number for each downstream release.
+3. Reset the build number after an upstream version change.
+4. Use the complete version for reproducible installation.
+
+
+## Harness selection
+
+Normal scans use the standard harness path.
+
+Use `--harness earlystop` to select the adaptive EarlyStop harness.
+
+```bash
+garak --target_type openai \
+  --target_name gpt-5-nano \
+  --harness earlystop \
+  --spec "probes.grandma.GrandmaIntent,intent:S"
+```
+
+Set the same option in a YAML configuration file:
+
+```yaml
+run:
+  harness: earlystop
+  spec:
+    include:
+      - probes.grandma.GrandmaIntent
+      - intent: S
+```
+
+The EarlyStop harness runs only when `run.harness` is set to `earlystop`.
+The default value keeps normal `ProbewiseHarness` and `PxD` dispatch unchanged.
+
+
 ## Getting started
 
 The general syntax is:
