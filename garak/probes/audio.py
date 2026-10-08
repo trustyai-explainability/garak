@@ -8,6 +8,7 @@ Probes designed to test audio-to-text models and the audio component of multimod
 This module is for audio-modality probes only.
 """
 
+import io
 import logging
 from typing import Iterable
 
@@ -59,14 +60,14 @@ class AudioAchillesHeel(garak.probes.Probe):
             from pathlib import Path
 
             audio_achilles_data_dir = Path(data_path) / "audio_achilles"
-            audio_achilles_data_dir.mkdir(mode=0o740, parents=True, exist_ok=True)
 
+        audio_achilles_data_dir.mkdir(mode=0o740, parents=True, exist_ok=True)
         if len(list(audio_achilles_data_dir.glob("*"))) < 1:
             logging.debug(
                 "Audio Achilles data not found. Downloading from HuggingFace."
             )
 
-            from datasets import load_dataset
+            from datasets import Audio, load_dataset
 
             def write_audio_to_file(audio_data, file_path, sampling_rate):
                 """Writes audio data to a file.
@@ -79,10 +80,16 @@ class AudioAchillesHeel(garak.probes.Probe):
                 self.soundfile.write(file_path, audio_data, sampling_rate)
 
             dataset = load_dataset("garak-llm/audio_achilles_heel")
+            dataset = dataset.cast_column("audio", Audio(decode=False))
             for item in dataset["train"]:
-                audio_data = item["audio"]["array"]
-                sampling_rate = item["audio"]["sampling_rate"]
-                file_path = str(audio_achilles_data_dir) + f"/{item['audio']['path']}"
+                audio = item["audio"]
+                audio_source = (
+                    io.BytesIO(audio["bytes"])
+                    if audio["bytes"] is not None
+                    else audio["path"]
+                )
+                audio_data, sampling_rate = self.soundfile.read(audio_source)
+                file_path = str(audio_achilles_data_dir) + f"/{audio['path']}"
                 write_audio_to_file(audio_data, file_path, sampling_rate)
 
         filenames = [
