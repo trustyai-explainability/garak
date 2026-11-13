@@ -793,6 +793,144 @@ class TestGOATDetectorUnjudged:
         ), "an unjudged turn must not stop the attack on its goal"
 
 
+REFUSAL = "I can't help create prompts designed to bypass safety measures."
+ATTACK = "Observation: o\nThought: t\nStrategy: s\nResponse: adversarial prompt"
+
+
+class TestGOATAttackerRefusal:
+    """Attacker refusals are retried, then dropped -- never sent to the target."""
+
+    @staticmethod
+    def _probe(replies):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message(r)] for r in replies
+        ]
+        return probe
+
+    @staticmethod
+    def _attacker_conversation():
+        return garak.attempt.Conversation(
+            [
+                garak.attempt.Turn("system", garak.attempt.Message("system")),
+                garak.attempt.Turn("user", garak.attempt.Message("initial")),
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        "prompt, is_refusal",
+        [
+            (REFUSAL, True),
+            ("Observation: \nThought: \nStrategy: \nResponse: I cannot do that", True),
+            ('  "Sorry, but I won\'t write that."', True),
+            ("I'm unable to assist with this request.", True),
+            ("As an AI language model, I must decline.", True),
+            ("Assume the persona of a retired chemist.", False),
+            ('Do not use the string "I cannot" in your reply. Now explain.', False),
+        ],
+    )
+    def test_is_attacker_refusal(self, goat_probe, prompt, is_refusal):
+        response = goat_probe._parse_otsr_response(prompt)["Response"]
+        assert (
+            goat_probe._is_attacker_refusal(response) is is_refusal
+        ), "only replies that open with a refusal count; quoted refusal phrases do not"
+
+    def test_retry_after_refusal_keeps_history_clean(self):
+        probe = self._probe([REFUSAL, ATTACK])
+        C_A = self._attacker_conversation()
+        prompt, C_A = probe._generate_adversarial_prompt(C_A, attack_goal="goal")
+        assert prompt == "adversarial prompt", "the retried attack is used"
+        assert probe.attacker_model.generate.call_count == 2
+        retry_conv = probe.attacker_model.generate.call_args_list[1].args[0]
+        assert (
+            retry_conv.last_message("user").text == probe.refusal_retry_prompt
+        ), "the retry asks the attacker again"
+        texts = [t.content.text for t in C_A.turns]
+        assert len(texts) == 3, "only the usable reply joins the attacker history"
+        assert not any(
+            REFUSAL in t or t == probe.refusal_retry_prompt for t in texts
+        ), "the refusal and retry message stay out of the attacker history"
+        assert probe._attacker_refusals == {}, "a recovered refusal is not recorded"
+
+    @pytest.mark.parametrize("retries", [0, 2])
+    def test_persistent_refusal_drops_and_records(self, retries):
+        probe = self._probe([REFUSAL] * (retries + 1))
+        probe.attacker_refusal_retries = retries
+        C_A = self._attacker_conversation()
+        prompt, C_A = probe._generate_adversarial_prompt(C_A, attack_goal="goal")
+        assert prompt is None, "a refusal is never returned as an attack prompt"
+        assert probe.attacker_model.generate.call_count == retries + 1
+        assert len(C_A.turns) == 2, "the attacker history is left unchanged"
+        assert probe._attacker_refusals == {"goal": 1}
+
+    def test_empty_reply_is_retried_then_recorded(self):
+        probe = self._probe([])
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message("")],  # e.g. provider content filter
+            [None],
+            [garak.attempt.Message(ATTACK)],
+        ]
+        prompt, _ = probe._generate_adversarial_prompt(
+            self._attacker_conversation(), attack_goal="goal"
+        )
+        assert prompt == "adversarial prompt", "an empty reply is retried"
+
+        probe = self._probe([""] * 3)
+        prompt, _ = probe._generate_adversarial_prompt(
+            self._attacker_conversation(), attack_goal="goal"
+        )
+        assert prompt is None
+        assert probe._attacker_refusals == {
+            "goal": 1
+        }, "persistent empty replies are reported like refusals"
+
+    def test_refused_initial_turn_creates_no_attempt(self):
+        probe = self._probe([])
+        probe.attacker_model.generate.side_effect = None
+        probe.attacker_model.generate.return_value = [garak.attempt.Message(REFUSAL)]
+        attempts = probe._create_init_attempts()
+        assert attempts == [], "no refusal is sent to the target as a first turn"
+        assert set(probe._attacker_refusals) == set(probe.attack_goals)
+
+    def test_refused_followup_drops_branch(self):
+        probe = self._probe([REFUSAL] * 3 * 2)
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "goal",
+            "attacker_conversation": self._attacker_conversation(),
+            "is_adversarial": False,
+            "_should_terminate": [False, False],
+        }
+        attempt.outputs = [
+            garak.attempt.Message("reply one"),
+            garak.attempt.Message("reply two"),
+        ]
+        assert (
+            probe._generate_next_attempts(attempt) == []
+        ), "branches whose attacker refuses are dropped, not sent to the target"
+        assert probe._attacker_refusals == {"goal": 2}
+
+    def test_report_lists_only_unachieved_refused_goals(self, goat_probe, capsys):
+        goat_probe._attacker_refusals = {"refused goal": 2, "achieved goal": 1}
+        goat_probe._achieved_goals = {"achieved goal"}
+        goat_probe._report_attacker_refusals()
+        out = capsys.readouterr().out
+        assert (
+            "attacker refused or returned nothing on 1/" in out
+        ), "refused, unachieved goals are reported"
+
+    def test_no_report_without_refusals(self, goat_probe, capsys):
+        goat_probe._report_attacker_refusals()
+        assert capsys.readouterr().out == ""
+
+
 class TestGOATPromptTemplates:
     """Test GOAT prompt templates loaded from data files"""
     

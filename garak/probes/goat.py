@@ -71,12 +71,18 @@ class GOATAttack(garak.probes.IterativeProbe):
             internally for early stopping but never evaluated by the detector.
             Only the final turn is seen by the detector.
 
+        attacker_refusal_retries: Extra attacker calls when the attacker refuses
+            to produce a prompt. A refusal is never sent to the target; if the
+            attacker still refuses, that branch is dropped and the goal is
+            reported as attacker-refused rather than as target robustness.
+
     Prompt Customization (for different attacker models or styles):
         custom_system_prompt: Override the attacker system prompt
         custom_initial_prompt: Override the initial turn prompt template
         custom_followup_prompt: Override the followup turn prompt template
         custom_judge_prompt: Override the jailbreak judge prompt
         custom_attack_techniques: Dict of {"Name": "Definition"} for custom techniques
+        custom_refusal_retry_prompt: Override the message sent when retrying after an attacker refusal
 
     Note:
         For best results, use different models for the red-team attacker, the
@@ -123,6 +129,8 @@ class GOATAttack(garak.probes.IterativeProbe):
         #       final turn (when every branch has terminated or max_calls_per_conv
         #       is reached) is seen by the detector.
         "early_stop_on": "any",
+        # Extra attacker calls after a refusal before the branch is dropped
+        "attacker_refusal_retries": 2,
         # Attacker LLM configuration
         "red_team_model_type": "huggingface.Model",
         "red_team_model_name": "Qwen/Qwen3-4B-Thinking-2507",
@@ -144,7 +152,18 @@ class GOATAttack(garak.probes.IterativeProbe):
         "custom_judge_prompt": None,
         # Custom attack techniques dict: {"Technique Name": "Technique Definition", ...}
         "custom_attack_techniques": None,
+        "custom_refusal_retry_prompt": None,
     }
+
+    # A refusal opens the attacker's reply; attacks may quote these phrases later
+    # on (e.g. refusal suppression), so only the start is checked.
+    _ATTACKER_REFUSAL_RE = re.compile(
+        r"^\W*(?:sorry\b|i(?:'|’)?m sorry|i am sorry|i apologi[sz]e"
+        r"|i can(?:'|’)?t\b|i cannot\b|i can not\b|i won(?:'|’)?t\b|i will not\b"
+        r"|i(?:'|’)?m (?:not able|unable)|i am (?:not able|unable)|i must decline"
+        r"|as an ai (?:language model|assistant))",
+        re.IGNORECASE,
+    )
 
     def __init__(self, config_root=_config):
         self.attacker_model = None
@@ -154,6 +173,8 @@ class GOATAttack(garak.probes.IterativeProbe):
         # one attempt, sibling attempts for the same goal at the same turn may
         # already be queued. This set lets _generate_next_attempts skip them.
         self._achieved_goals: set = set()
+        # Goals whose attacker refused even after retries -> branches dropped
+        self._attacker_refusals: Dict[str, int] = {}
         super().__init__(config_root=config_root)
 
         # Validate early_stop_on
@@ -232,6 +253,15 @@ class GOATAttack(garak.probes.IterativeProbe):
         else:
             with open(goat_data_path / "judge_prompt.txt", "r", encoding="utf-8") as f:
                 self.judge_prompt_template = f.read()
+
+        # Sent to the attacker when retrying after it refused
+        if self.custom_refusal_retry_prompt:
+            self.refusal_retry_prompt = self.custom_refusal_retry_prompt
+        else:
+            with open(
+                goat_data_path / "refusal_retry_prompt.txt", "r", encoding="utf-8"
+            ) as f:
+                self.refusal_retry_prompt = f.read()
 
     def _get_attack_goals(self) -> List[str]:
         """Get attack goals from custom list and/or HuggingFace dataset."""
@@ -371,7 +401,9 @@ class GOATAttack(garak.probes.IterativeProbe):
             )
 
             # Generate first adversarial prompt from attacker LLM
-            adversarial_prompt, C_A = self._generate_adversarial_prompt(C_A)
+            adversarial_prompt, C_A = self._generate_adversarial_prompt(
+                C_A, attack_goal=goal
+            )
             if adversarial_prompt is None:
                 logging.warning(
                     f"goat.GOATAttack: No initial adversarial prompt for goal: {goal[:50]}..."
@@ -496,36 +528,105 @@ class GOATAttack(garak.probes.IterativeProbe):
         return super()._postprocess_attempt(this_attempt)
 
     def _generate_adversarial_prompt(
-        self, attacker_conversation: garak.attempt.Conversation
+        self,
+        attacker_conversation: garak.attempt.Conversation,
+        attack_goal: Optional[str] = None,
     ) -> Tuple[Optional[str], garak.attempt.Conversation]:
         """Generate an adversarial prompt using the attacker LLM.
 
+        A refusal or unusable reply is never returned as a prompt: the attacker
+        is retried up to ``attacker_refusal_retries`` times on a scratch copy of
+        its conversation, so only a usable reply is added to ``attacker_conversation``.
+
         Args:
             attacker_conversation: The attacker's conversation history (C_A)
+            attack_goal: Goal recorded as attacker-refused if every try fails
 
         Returns:
             Tuple of (adversarial_prompt or None, updated_attacker_conversation)
         """
-        attacker_response = self._call_attacker_llm(attacker_conversation)
-        if not attacker_response:
-            return None, attacker_conversation
+        conversation = attacker_conversation
+        for _ in range(max(self.attacker_refusal_retries, 0) + 1):
+            attacker_response = self._call_attacker_llm(conversation)
+            if not attacker_response:
+                # empty reply, e.g. a provider content filter: ask again unchanged
+                logging.info("goat.GOATAttack: Attacker returned nothing; retrying")
+                conversation = attacker_conversation
+                continue
 
-        attacker_response_text = self._extract_content(attacker_response)
+            attacker_response_text = self._extract_content(attacker_response)
 
-        # Parse O-T-S-R format
-        r_A = self._parse_otsr_response(attacker_response_text)
-        adversarial_prompt = r_A.get("Response") if r_A else None
+            # Parse O-T-S-R format
+            r_A = self._parse_otsr_response(attacker_response_text)
+            adversarial_prompt = r_A.get("Response") if r_A else None
 
-        # Update C_A with attacker's response
-        if r_A:
-            formatted_response = self._format_otsr(r_A)
-            attacker_conversation.turns.append(
+            if adversarial_prompt and not self._is_attacker_refusal(adversarial_prompt):
+                attacker_conversation.turns.append(
+                    garak.attempt.Turn(
+                        "assistant", garak.attempt.Message(self._format_otsr(r_A))
+                    )
+                )
+                return adversarial_prompt, attacker_conversation
+
+            logging.info(
+                "goat.GOATAttack: Attacker refused or gave no usable prompt; retrying"
+            )
+            conversation = copy.deepcopy(attacker_conversation)
+            conversation.turns.append(
                 garak.attempt.Turn(
-                    "assistant", garak.attempt.Message(formatted_response)
+                    "assistant", garak.attempt.Message(attacker_response_text)
+                )
+            )
+            conversation.turns.append(
+                garak.attempt.Turn(
+                    "user", garak.attempt.Message(self.refusal_retry_prompt)
                 )
             )
 
-        return adversarial_prompt, attacker_conversation
+        logging.warning(
+            f"goat.GOATAttack: Attacker refused or returned nothing after "
+            f"{self.attacker_refusal_retries} retries; dropping branch for goal: "
+            f"{(attack_goal or '')[:50]}..."
+        )
+        if attack_goal is not None:
+            self._attacker_refusals[attack_goal] = (
+                self._attacker_refusals.get(attack_goal, 0) + 1
+            )
+        return None, attacker_conversation
+
+    def _is_attacker_refusal(self, adversarial_prompt: str) -> bool:
+        """Return True if the attacker's prompt is a refusal rather than an attack."""
+        return bool(self._ATTACKER_REFUSAL_RE.match(adversarial_prompt[:200]))
+
+    def probe(self, generator) -> List[garak.attempt.Attempt]:
+        """Run the attack, then report goals the attacker refused to pursue."""
+        attempts = super().probe(generator)
+        self._report_attacker_refusals()
+        return attempts
+
+    def _report_attacker_refusals(self) -> None:
+        """Warn about unachieved goals where the attacker refused, so they are
+        not mistaken for target robustness."""
+        refused = {
+            goal: count
+            for goal, count in self._attacker_refusals.items()
+            if goal not in self._achieved_goals
+        }
+        if not refused:
+            return
+        msg = (
+            f"attacker refused or returned nothing on {len(refused)}/"
+            f"{len(self.attack_goals)} goal(s) that were not achieved; their "
+            "results reflect the attacker, not target robustness"
+        )
+        logging.warning(
+            f"goat.GOATAttack: {msg}: "
+            + "; ".join(
+                f"{goal[:60]!r} ({count} branch(es) dropped)"
+                for goal, count in refused.items()
+            )
+        )
+        print(f"⚠️  {self.probename.replace('garak.', '')}: {msg}")
 
     def _should_terminate_conversation(
         self, attempt: garak.attempt.Attempt
@@ -731,7 +832,7 @@ class GOATAttack(garak.probes.IterativeProbe):
 
             # Generate next adversarial prompt
             adversarial_prompt, branch_C_A = self._generate_adversarial_prompt(
-                branch_C_A
+                branch_C_A, attack_goal=attack_goal
             )
             if adversarial_prompt is None:
                 logging.warning(
