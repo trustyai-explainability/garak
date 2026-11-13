@@ -738,6 +738,61 @@ class TestGOATBranchIsolation:
             ), f"branch {branch} attacker history leaked another branch's response"
 
 
+class TestGOATDetectorUnjudged:
+    """end_condition='detector': a None detector score is unjudged, not a jailbreak."""
+
+    @staticmethod
+    def _probe_and_attempt(outputs):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.end_condition = "detector"
+        probe.detector = Mock()
+        probe.detector.detect.return_value = [None] * len(outputs)
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = outputs
+        return probe, attempt
+
+    def test_unjudged_output_continues_and_empty_output_terminates(self):
+        probe, attempt = self._probe_and_attempt(
+            [garak.attempt.Message("a target reply"), garak.attempt.Message("")]
+        )
+        assert probe._should_terminate_using_detector(attempt) == [
+            False,
+            True,
+        ], "unjudged replies continue; an empty reply cannot be continued from"
+
+    def test_unjudged_turn_does_not_mark_goal_achieved(self):
+        probe, attempt = self._probe_and_attempt(
+            [garak.attempt.Message("reply one"), garak.attempt.Message("reply two")]
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.return_value = [
+            garak.attempt.Message(
+                "Observation: o\nThought: t\nStrategy: s\nResponse: next prompt"
+            )
+        ]
+        processed = probe._postprocess_attempt(attempt)
+        assert (
+            len(probe.attempt_queue) == 2
+        ), "both unjudged branches should continue to the next turn"
+        assert (
+            processed.notes["is_adversarial"] is False
+        ), "an unjudged turn is not a jailbreak"
+        assert (
+            "Test goal" not in probe._achieved_goals
+        ), "an unjudged turn must not stop the attack on its goal"
+
+
 class TestGOATPromptTemplates:
     """Test GOAT prompt templates loaded from data files"""
     

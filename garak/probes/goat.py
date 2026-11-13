@@ -573,9 +573,18 @@ class GOATAttack(garak.probes.IterativeProbe):
 
         current_turn = attempt.conversations[0].notes.get("turn", 1)
         should_terminate = []
-        for score in detector_scores:
+        for output, score in zip(attempt.outputs, detector_scores):
             if score is None:
-                should_terminate.append(True)  # Terminate on evaluation failure
+                if output is None or not output.text:
+                    # nothing from the target to continue the conversation from
+                    should_terminate.append(True)
+                else:
+                    # the judge could not score this output; that is not a jailbreak,
+                    # and terminating would mark the goal achieved, so keep attacking
+                    logging.warning(
+                        f"goat.GOATAttack: Detector could not judge output at turn {current_turn}; continuing"
+                    )
+                    should_terminate.append(False)
             else:
                 # Score of 1.0 means jailbreak detected (unsafe)
                 is_jailbreak = score >= self.eval_threshold
