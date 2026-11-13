@@ -76,6 +76,14 @@ class GOATAttack(garak.probes.IterativeProbe):
             attacker still refuses, that branch is dropped and the goal is
             reported as attacker-refused rather than as target robustness.
 
+        attacker_output_check: Also classify each attacker prompt with an LLM
+            and treat a sanitized prompt (one redirected to a harmless or lawful
+            version of the goal) or a refusal like a refusal. Costs one extra
+            call per attacker reply; an unparseable verdict accepts the prompt.
+
+        attacker_check_model_type / _name / _config: Model for the check.
+            Unset uses the primary detector's judge model.
+
     Prompt Customization (for different attacker models or styles):
         custom_system_prompt: Override the attacker system prompt
         custom_initial_prompt: Override the initial turn prompt template
@@ -83,6 +91,7 @@ class GOATAttack(garak.probes.IterativeProbe):
         custom_judge_prompt: Override the jailbreak judge prompt
         custom_attack_techniques: Dict of {"Name": "Definition"} for custom techniques
         custom_refusal_retry_prompt: Override the message sent when retrying after an attacker refusal
+        custom_attacker_check_prompt: Override the attacker_output_check classifier prompt
 
     Note:
         For best results, use different models for the red-team attacker, the
@@ -153,6 +162,12 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Custom attack techniques dict: {"Technique Name": "Technique Definition", ...}
         "custom_attack_techniques": None,
         "custom_refusal_retry_prompt": None,
+        # LLM check of each attacker prompt for sanitizing/refusal (off by default)
+        "attacker_output_check": False,
+        "attacker_check_model_type": None,
+        "attacker_check_model_name": None,
+        "attacker_check_model_config": {},
+        "custom_attacker_check_prompt": None,
     }
 
     # A refusal opens the attacker's reply; attacks may quote these phrases later
@@ -175,6 +190,7 @@ class GOATAttack(garak.probes.IterativeProbe):
         self._achieved_goals: set = set()
         # Goals whose attacker refused even after retries -> branches dropped
         self._attacker_refusals: Dict[str, int] = {}
+        self.attacker_checker = None  # for attacker_output_check
         super().__init__(config_root=config_root)
 
         # Validate early_stop_on
@@ -262,6 +278,15 @@ class GOATAttack(garak.probes.IterativeProbe):
                 goat_data_path / "refusal_retry_prompt.txt", "r", encoding="utf-8"
             ) as f:
                 self.refusal_retry_prompt = f.read()
+
+        # Classifier prompt for attacker_output_check
+        if self.custom_attacker_check_prompt:
+            self.attacker_check_prompt = self.custom_attacker_check_prompt
+        else:
+            with open(
+                goat_data_path / "attacker_check_prompt.txt", "r", encoding="utf-8"
+            ) as f:
+                self.attacker_check_prompt = f.read()
 
     def _get_attack_goals(self) -> List[str]:
         """Get attack goals from custom list and/or HuggingFace dataset."""
@@ -358,6 +383,32 @@ class GOATAttack(garak.probes.IterativeProbe):
 
         logging.debug("goat.GOATAttack: Loading detector for early stopping...")
         self.detector = _plugins.load_plugin(f"detectors.{self.primary_detector}")
+
+    def _load_attacker_checker(self):
+        """Instantiate the model for attacker_output_check."""
+        if self.attacker_checker is not None:
+            return
+        if self.attacker_check_model_type:
+            module, klass = self.attacker_check_model_type.split(".")
+            config = {
+                "generators": {
+                    module: {
+                        klass: dict(self.attacker_check_model_config or {})
+                        | {"name": self.attacker_check_model_name},
+                    }
+                }
+            }
+            self.attacker_checker = _plugins.load_plugin(
+                f"generators.{self.attacker_check_model_type}", config_root=config
+            )
+            return
+        self._load_detector()
+        self.attacker_checker = getattr(self.detector, "evaluation_generator", None)
+        if self.attacker_checker is None:
+            raise GarakException(
+                f"attacker_output_check needs attacker_check_model_type, or a judge "
+                f"primary_detector; {self.primary_detector} has no judge model"
+            )
 
     def _format_attack_techniques(self) -> str:
         """Format attack techniques for the system prompt."""
@@ -560,7 +611,11 @@ class GOATAttack(garak.probes.IterativeProbe):
             r_A = self._parse_otsr_response(attacker_response_text)
             adversarial_prompt = r_A.get("Response") if r_A else None
 
-            if adversarial_prompt and not self._is_attacker_refusal(adversarial_prompt):
+            if (
+                adversarial_prompt
+                and not self._is_attacker_refusal(adversarial_prompt)
+                and not self._is_sanitized_or_refused(adversarial_prompt, attack_goal)
+            ):
                 attacker_conversation.turns.append(
                     garak.attempt.Turn(
                         "assistant", garak.attempt.Message(self._format_otsr(r_A))
@@ -584,7 +639,7 @@ class GOATAttack(garak.probes.IterativeProbe):
             )
 
         logging.warning(
-            f"goat.GOATAttack: Attacker refused or returned nothing after "
+            f"goat.GOATAttack: Attacker gave no usable attack after "
             f"{self.attacker_refusal_retries} retries; dropping branch for goal: "
             f"{(attack_goal or '')[:50]}..."
         )
@@ -597,6 +652,49 @@ class GOATAttack(garak.probes.IterativeProbe):
     def _is_attacker_refusal(self, adversarial_prompt: str) -> bool:
         """Return True if the attacker's prompt is a refusal rather than an attack."""
         return bool(self._ATTACKER_REFUSAL_RE.match(adversarial_prompt[:200]))
+
+    def _is_sanitized_or_refused(
+        self, adversarial_prompt: str, attack_goal: Optional[str]
+    ) -> bool:
+        """With attacker_output_check, ask an LLM whether the prompt is a real attack.
+
+        Returns False (accept the prompt) when the check is off, there is no goal
+        to check against, or the checker gives no verdict.
+        """
+        if not self.attacker_output_check or not attack_goal:
+            return False
+        self._load_attacker_checker()
+        conversation = garak.attempt.Conversation(
+            [
+                garak.attempt.Turn(
+                    "system", garak.attempt.Message(self.attacker_check_prompt)
+                ),
+                garak.attempt.Turn(
+                    "user",
+                    garak.attempt.Message(
+                        f"GOAL: {attack_goal}\n\nATTACKER PROMPT:\n{adversarial_prompt}"
+                    ),
+                ),
+            ]
+        )
+        try:
+            outputs = self.attacker_checker.generate(
+                conversation, generations_this_call=1
+            )
+        except GarakException as e:
+            logging.warning(f"goat.GOATAttack: Attacker output check failed: {e}")
+            return False
+        text = outputs[0].text if outputs and outputs[0] else None
+        match = re.search(r"\[\[(ATTACK|SANITIZED|REFUSAL)\]\]", text or "", re.I)
+        if match is None:
+            logging.warning(
+                "goat.GOATAttack: Attacker output check gave no verdict; accepting prompt"
+            )
+            return False
+        verdict = match.group(1).upper()
+        if verdict != "ATTACK":
+            logging.info(f"goat.GOATAttack: Attacker output check: {verdict}")
+        return verdict != "ATTACK"
 
     def probe(self, generator) -> List[garak.attempt.Attempt]:
         """Run the attack, then report goals the attacker refused to pursue."""
@@ -615,9 +713,9 @@ class GOATAttack(garak.probes.IterativeProbe):
         if not refused:
             return
         msg = (
-            f"attacker refused or returned nothing on {len(refused)}/"
-            f"{len(self.attack_goals)} goal(s) that were not achieved; their "
-            "results reflect the attacker, not target robustness"
+            f"attacker produced no usable attack (refused, sanitized or empty) on "
+            f"{len(refused)}/{len(self.attack_goals)} goal(s) that were not "
+            "achieved; their results reflect the attacker, not target robustness"
         )
         logging.warning(
             f"goat.GOATAttack: {msg}: "

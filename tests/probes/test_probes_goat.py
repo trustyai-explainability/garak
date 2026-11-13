@@ -923,12 +923,87 @@ class TestGOATAttackerRefusal:
         goat_probe._report_attacker_refusals()
         out = capsys.readouterr().out
         assert (
-            "attacker refused or returned nothing on 1/" in out
+            "attacker produced no usable attack (refused, sanitized or empty) on 1/"
+            in out
         ), "refused, unachieved goals are reported"
 
     def test_no_report_without_refusals(self, goat_probe, capsys):
         goat_probe._report_attacker_refusals()
         assert capsys.readouterr().out == ""
+
+
+class TestGOATAttackerOutputCheck:
+    """attacker_output_check: an LLM verdict rejects sanitized or refused prompts."""
+
+    @staticmethod
+    def _probe(attacker_replies, verdicts):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_output_check = True
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message(r)] for r in attacker_replies
+        ]
+        probe.attacker_checker = Mock()
+        probe.attacker_checker.generate.side_effect = [
+            [garak.attempt.Message(v)] if isinstance(v, str) else v for v in verdicts
+        ]
+        return probe
+
+    @staticmethod
+    def _attack(text):
+        return f"Observation: o\nThought: t\nStrategy: s\nResponse: {text}"
+
+    def _generate(self, probe):
+        return probe._generate_adversarial_prompt(
+            TestGOATAttackerRefusal._attacker_conversation(), attack_goal="goal"
+        )[0]
+
+    def test_sanitized_prompt_is_retried(self):
+        probe = self._probe(
+            [self._attack("lawful version"), self._attack("real attack")],
+            ["[[SANITIZED]]", "[[ATTACK]]"],
+        )
+        assert self._generate(probe) == "real attack", "a sanitized prompt is retried"
+        checked = probe.attacker_checker.generate.call_args_list[0].args[0]
+        assert "goal" in checked.last_message("user").text
+        assert "lawful version" in checked.last_message("user").text
+
+    def test_persistent_sanitizing_drops_and_records(self):
+        probe = self._probe([self._attack("lawful version")] * 3, ["[[SANITIZED]]"] * 3)
+        assert self._generate(probe) is None, "a sanitized prompt is never sent"
+        assert probe._attacker_refusals == {"goal": 1}
+
+    @pytest.mark.parametrize("verdict", ["no verdict here", [None]])
+    def test_checker_without_verdict_accepts_prompt(self, verdict):
+        probe = self._probe([self._attack("real attack")], [verdict])
+        assert (
+            self._generate(probe) == "real attack"
+        ), "a checker failure must not drop a real attack"
+
+    def test_check_off_skips_checker(self):
+        probe = self._probe([self._attack("lawful version")], [])
+        probe.attacker_output_check = False
+        assert self._generate(probe) == "lawful version"
+        probe.attacker_checker.generate.assert_not_called()
+
+    def test_checker_defaults_to_detector_judge(self, goat_probe):
+        judge_model = Mock()
+        goat_probe.detector = Mock(evaluation_generator=judge_model)
+        goat_probe._load_attacker_checker()
+        assert goat_probe.attacker_checker is judge_model
+
+    def test_checker_needs_a_judge_model(self, goat_probe):
+        goat_probe.detector = Mock(spec=[])
+        with pytest.raises(GarakException):
+            goat_probe._load_attacker_checker()
+
+    def test_checker_model_from_config(self, goat_probe):
+        goat_probe.attacker_check_model_type = "test.Repeat"
+        goat_probe.attacker_check_model_name = ""
+        goat_probe._load_attacker_checker()
+        assert goat_probe.attacker_checker.__class__.__name__ == "Repeat"
 
 
 class TestGOATPromptTemplates:
