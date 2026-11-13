@@ -714,14 +714,16 @@ class GOATAttack(garak.probes.IterativeProbe):
                 prev_model_response=last_response.text,
             )
 
-            # Deep copy to avoid mutating original
-            C_A = copy.deepcopy(C_A)
-            C_A.turns.append(
+            # Each branch extends its own copy of the shared attacker history
+            branch_C_A = copy.deepcopy(C_A)
+            branch_C_A.turns.append(
                 garak.attempt.Turn("user", garak.attempt.Message(followup_prompt))
             )
 
             # Generate next adversarial prompt
-            adversarial_prompt, C_A = self._generate_adversarial_prompt(C_A)
+            adversarial_prompt, branch_C_A = self._generate_adversarial_prompt(
+                branch_C_A
+            )
             if adversarial_prompt is None:
                 logging.warning(
                     f"goat.GOATAttack: No followup adversarial prompt for attack goal: {attack_goal[:50]}..."
@@ -742,7 +744,7 @@ class GOATAttack(garak.probes.IterativeProbe):
             next_attempt.notes.update(
                 {
                     "attack_goal": attack_goal,
-                    "attacker_conversation": C_A,
+                    "attacker_conversation": branch_C_A,
                     "is_adversarial": False,
                 }
             )

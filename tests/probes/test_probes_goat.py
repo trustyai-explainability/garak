@@ -679,6 +679,65 @@ class TestEarlyStopOn:
             )
 
 
+class TestGOATBranchIsolation:
+    """Attacker history must stay independent across generation branches."""
+
+    def test_attacker_conversation_not_shared_between_branches(self):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [
+                garak.attempt.Message(
+                    f"Observation: o{i}\nThought: t{i}\nStrategy: s{i}\nResponse: attack {i}"
+                )
+            ]
+            for i in (1, 2)
+        ]
+
+        base_C_A = garak.attempt.Conversation(
+            [
+                garak.attempt.Turn("system", garak.attempt.Message("attacker system")),
+                garak.attempt.Turn("user", garak.attempt.Message("initial")),
+                garak.attempt.Turn("assistant", garak.attempt.Message("first otsr")),
+            ]
+        )
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": base_C_A,
+            "is_adversarial": False,
+            "_should_terminate": [False, False],
+        }
+        attempt.outputs = [
+            garak.attempt.Message("BRANCH_ONE_RESPONSE"),
+            garak.attempt.Message("BRANCH_TWO_RESPONSE"),
+        ]
+
+        next_attempts = probe._generate_next_attempts(attempt)
+        assert len(next_attempts) == 2, "both unterminated branches should continue"
+
+        expected_turns = len(base_C_A.turns) + 2  # followup prompt + attacker reply
+        for branch, own, other in (
+            (0, "BRANCH_ONE_RESPONSE", "BRANCH_TWO_RESPONSE"),
+            (1, "BRANCH_TWO_RESPONSE", "BRANCH_ONE_RESPONSE"),
+        ):
+            C_A = next_attempts[branch].notes["attacker_conversation"]
+            history = "\n".join(turn.content.text for turn in C_A.turns)
+            assert (
+                len(C_A.turns) == expected_turns
+            ), f"branch {branch} attacker history should extend only the shared base"
+            assert own in history, f"branch {branch} should see its own target response"
+            assert (
+                other not in history
+            ), f"branch {branch} attacker history leaked another branch's response"
+
+
 class TestGOATPromptTemplates:
     """Test GOAT prompt templates loaded from data files"""
     
