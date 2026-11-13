@@ -10,6 +10,7 @@ from typing import List
 from garak import _config, _plugins
 from garak.resources.red_team.evaluation import (
     EvaluationJudge,
+    first_output_text,
     get_token_limit,
     process_output_judge_score,
     process_output_on_topic_score,
@@ -436,7 +437,7 @@ class Jailbreak(ModelAsJudge):
             )
 
             # Generate judge response
-            raw_output = self.evaluation_generator.generate(conv)[0].text
+            raw_output = first_output_text(self.evaluation_generator.generate(conv))
 
             # Parse [[YES]]/[[NO]] response
             score = process_output_on_topic_score(raw_output)

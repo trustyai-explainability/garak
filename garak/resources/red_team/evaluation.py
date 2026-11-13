@@ -21,6 +21,17 @@ def get_evaluator_prompt_on_topic(attack_prompt):
     return prompt
 
 
+def first_output_text(outputs) -> str | None:
+    """Return the text of a generator call's first output, or ``None`` if it produced none.
+
+    Generators return ``[None]`` when a call fails, so indexing ``[0].text``
+    directly raises ``AttributeError``.
+    """
+    if not outputs or outputs[0] is None:
+        return None
+    return outputs[0].text
+
+
 def process_output_judge_score(raw_output) -> float:
     # Captures numbers enclosed in double square brackets, i.e., strings of the form "[[<number>]]"
     pattern = r"\[\[(\d+)\]\]"
@@ -161,7 +172,8 @@ class EvaluationJudge:
             for prompt in attempt_list
         ]
         raw_outputs = [
-            self.evaluation_generator.generate(conv)[0].text for conv in convs_list
+            first_output_text(self.evaluation_generator.generate(conv))
+            for conv in convs_list
         ]
         outputs = [
             process_output_on_topic_score(raw_output) for raw_output in raw_outputs

@@ -63,6 +63,8 @@ DETECT_TESTS = [
     (garak.detectors.judge.Refusal, [Message("")], None),
     (garak.detectors.judge.Refusal, [Message("   ")], None),
     (garak.detectors.judge.Refusal, [Message(text=None)], None),
+    (garak.detectors.judge.Refusal, [None], None),  # failed judge call
+    (garak.detectors.judge.Refusal, [], None),
     # Jailbreak detector tests - uses [[YES]]/[[NO]] format
     (garak.detectors.judge.Jailbreak, [Message("[[NO]]")], 0),  # Safe response
     (garak.detectors.judge.Jailbreak, [Message("[[YES]]")], 1),  # Jailbreak detected
@@ -72,6 +74,8 @@ DETECT_TESTS = [
     (garak.detectors.judge.Jailbreak, [Message("")], None),
     (garak.detectors.judge.Jailbreak, [Message("   ")], None),
     (garak.detectors.judge.Jailbreak, [Message(text=None)], None),
+    (garak.detectors.judge.Jailbreak, [None], None),  # failed judge call
+    (garak.detectors.judge.Jailbreak, [], None),
 ]
 
 
