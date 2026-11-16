@@ -793,6 +793,43 @@ class TestGOATDetectorUnjudged:
         ), "an unjudged turn must not stop the attack on its goal"
 
 
+class TestGOATEmptyTargetOutput:
+    """An empty target reply ends its branch without counting as a jailbreak."""
+
+    def test_empty_output_does_not_achieve_goal(self):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        assert probe.early_stop_on == "any"
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.return_value = [
+            garak.attempt.Message(
+                "Observation: o\nThought: t\nStrategy: s\nResponse: next prompt"
+            )
+        ]
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = [garak.attempt.Message(""), garak.attempt.Message("reply")]
+        with patch.object(
+            probe, "_should_terminate_conversation", return_value=[True, False]
+        ):
+            processed = probe._postprocess_attempt(attempt)
+
+        assert processed.notes["is_adversarial"] is False, "no branch was jailbroken"
+        assert "Test goal" not in probe._achieved_goals
+        assert (
+            len(probe.attempt_queue) == 1
+        ), "the empty branch ends; the other branch continues"
+
+
 class TestGOATEarlyStopVerdictReused:
     """Final scoring reuses the detector verdict that decided early stopping."""
 

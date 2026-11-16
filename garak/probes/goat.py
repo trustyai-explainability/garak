@@ -534,26 +534,33 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Turn number is tracked on the Conversation object, not attempt.notes
         current_turn = this_attempt.conversations[0].notes.get("turn", 1)
         is_last_possible_turn = current_turn >= self.max_calls_per_conv
-        any_terminated = any(should_terminate)
         all_terminated = all(should_terminate)
+        # A branch with no target output terminates (nothing to continue from) but is
+        # not a jailbreak: it must not mark the goal achieved or stop sibling branches
+        jailbroken = [
+            bool(stop) and output is not None and bool(output.text)
+            for stop, output in zip(should_terminate, this_attempt.outputs)
+        ]
+        any_jailbroken = any(jailbroken)
 
-        # Cache the termination decision so _generate_next_attempts uses the same result
+        # Cache the decisions so _generate_next_attempts uses the same result
         this_attempt.notes["_should_terminate"] = should_terminate
+        this_attempt.notes["_jailbroken"] = jailbroken
 
         # Set is_adversarial before parent's deep copy
         if self.early_stop_on == "any":
             # Mark adversarial if ANY branch jailbroken or we've hit max turns.
             # This ensures every jailbreak is evaluated by the detector.
-            is_adversarial = any_terminated or is_last_possible_turn
+            is_adversarial = any_jailbroken or is_last_possible_turn
         else:
             # "all" mode: mark adversarial only when ALL branches are done.
             is_adversarial = all_terminated or is_last_possible_turn
 
             # Warn when "all" mode silently drops jailbreaks that the detector
             # will never see: some branches jailbroken but not all.
-            if any_terminated and not all_terminated and not is_last_possible_turn:
-                n_jailbroken = sum(should_terminate)
-                n_total = len(should_terminate)
+            if any_jailbroken and not all_terminated and not is_last_possible_turn:
+                n_jailbroken = sum(jailbroken)
+                n_total = len(jailbroken)
                 logging.warning(
                     f"goat.GOATAttack: early_stop_on='all' — {n_jailbroken}/{n_total} "
                     f"branches jailbroken at turn {current_turn} but attempt is NOT "
@@ -571,7 +578,7 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Record achieved goals for cross-attempt coordination.
         # When a jailbreak is found, sibling attempts for the same goal that
         # were queued at the same turn should not generate further turns.
-        if any_terminated:
+        if any_jailbroken:
             if attack_goal:
                 self._achieved_goals.add(attack_goal)
 
@@ -892,7 +899,8 @@ class GOATAttack(garak.probes.IterativeProbe):
 
         # In "any" mode, if any branch of THIS attempt was jailbroken the
         # attack_goal is achieved. Stop all branches.
-        if self.early_stop_on == "any" and any(should_terminate):
+        jailbroken = last_attempt.notes.get("_jailbroken", should_terminate)
+        if self.early_stop_on == "any" and any(jailbroken):
             logging.debug(
                 f"goat.GOATAttack: early_stop_on='any' — at least one branch "
                 f"terminated at turn {current_turn}, stopping all branches for goal: "
