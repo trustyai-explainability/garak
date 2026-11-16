@@ -380,3 +380,17 @@ def test_terminal_http_error_returns_none(openai_compatible_generator, code):
     unwrapped = OpenAICompatible._call_model.__wrapped__
     result = unwrapped(openai_compatible_generator, prompt)
     assert result == [None], f"Expected [None] for HTTP {code}, got {result!r}"
+
+
+def test_choice_without_message_returns_none(openai_compatible_generator):
+    """A choice with no message (e.g. a provider safety block) yields a None output instead of raising."""
+    prompt = _make_prompt()
+    openai_compatible_generator.generator = MagicMock()
+    blocked = MagicMock(message=None, finish_reason="content_filter")
+    openai_compatible_generator.generator.create.return_value = MagicMock(
+        choices=[blocked]
+    )
+
+    unwrapped = OpenAICompatible._call_model.__wrapped__
+    result = unwrapped(openai_compatible_generator, prompt)
+    assert result == [None], "a choice without a message is a missing output"
