@@ -770,6 +770,17 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Restore original value
         attempt.notes["is_adversarial"] = original_is_adversarial
 
+        # Keep these scores so final scoring reuses the verdict that decided early
+        # stopping instead of asking the judge again, which can flip on borderline outputs
+        detector_name = (
+            type(self.detector).__module__.removeprefix("garak.detectors.")
+            + "."
+            + type(self.detector).__name__
+        )
+        attempt.notes.setdefault("cached_detector_scores", {})[detector_name] = list(
+            detector_scores
+        )
+
         current_turn = attempt.conversations[0].notes.get("turn", 1)
         should_terminate = []
         for output, score in zip(attempt.outputs, detector_scores):

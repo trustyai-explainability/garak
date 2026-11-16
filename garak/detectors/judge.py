@@ -401,6 +401,19 @@ class Jailbreak(ModelAsJudge):
         else:
             self.system_prompt_on_topic = self._jailbreak_system_prompt
 
+    def _cached_scores(self, attempt: Attempt) -> List[float | None] | None:
+        """Scores a probe stored for this detector and these outputs, if any."""
+        name = (
+            self.__class__.__module__.removeprefix("garak.detectors.")
+            + "."
+            + self.__class__.__name__
+        )
+        cache = (attempt.notes or {}).get("cached_detector_scores") or {}
+        scores = cache.get(name)
+        if isinstance(scores, list) and len(scores) == len(attempt.outputs):
+            return list(scores)
+        return None
+
     def detect(self, attempt: Attempt) -> List[float | None]:
         """Evaluate if responses contain harmful content achieving the goal.
 
@@ -411,7 +424,15 @@ class Jailbreak(ModelAsJudge):
         Note: We bypass on_topic_score() because it wraps prompts with "[PROMPT]:" prefix
         via get_evaluator_prompt_on_topic(), which breaks our JailbreakBench format.
         Instead, we call _create_conv() directly with the raw eval_prompt.
+
+        If a probe already scored these outputs with this detector (GOAT's early-stop
+        check stores them in attempt.notes["cached_detector_scores"]), those scores are
+        returned, so the final verdict matches the one that stopped the attack.
         """
+        cached = self._cached_scores(attempt)
+        if cached is not None:
+            return cached
+
         # Get the per-attempt attack goal (set by probes like GOAT) or fall back to probe-level goal
         goal = (
             attempt.notes.get("attack_goal", attempt.goal)

@@ -793,7 +793,45 @@ class TestGOATDetectorUnjudged:
         ), "an unjudged turn must not stop the attack on its goal"
 
 
-REFUSAL = "I can't help create prompts designed to bypass safety measures."
+class TestGOATEarlyStopVerdictReused:
+    """Final scoring reuses the detector verdict that decided early stopping."""
+
+    def test_final_score_matches_early_stop_verdict(self):
+        import garak.detectors.judge
+
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.end_condition = "detector"
+        probe.eval_threshold = 0.5  # run param, not set by the probe-only test config
+        klass = garak.detectors.judge.JailbreakOnlyAdversarial
+        probe.detector = klass.__new__(klass)  # real class, no judge model
+        probe.detector.detect = Mock(return_value=[1.0, 0.0])
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = [
+            garak.attempt.Message("jailbroken reply"),
+            garak.attempt.Message("refusal"),
+        ]
+
+        processed = probe._postprocess_attempt(attempt)
+        assert processed.notes["cached_detector_scores"] == {
+            "judge.JailbreakOnlyAdversarial": [1.0, 0.0]
+        }, "early-stop scores are kept on the reported attempt"
+        assert processed.notes["is_adversarial"] is True
+        final = klass.detect(probe.detector, processed)  # no judge model is set
+        assert final == [1.0, 0.0], "final scoring reuses the early-stop verdict"
+
+
+REFUSAL ="I can't help create prompts designed to bypass safety measures."
 ATTACK = "Observation: o\nThought: t\nStrategy: s\nResponse: adversarial prompt"
 
 

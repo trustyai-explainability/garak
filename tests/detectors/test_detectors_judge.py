@@ -183,3 +183,57 @@ class TestRefusalOnlyAdversarial:
 
         mock_generate.assert_not_called()
         assert res == [None] * len(a.outputs)
+
+
+class TestJailbreakCachedScores:
+    """Scores a probe stored for this detector are reused instead of re-judging."""
+
+    @staticmethod
+    def _attempt(notes):
+        a = Attempt(probe_classname="test.Test", prompt=Message(text="test prompt"))
+        a.outputs = [Message("reply one"), Message("reply two")]
+        a.notes = notes
+        return a
+
+    def test_cached_scores_reused(self, judge_config, mocker):
+        d = garak.detectors.judge.JailbreakOnlyAdversarial(config_root=judge_config)
+        mock_generate = mocker.patch.object(
+            d.evaluation_generator, "generate", return_value=[Message("[[NO]]")]
+        )
+        a = self._attempt(
+            {
+                "is_adversarial": True,
+                "cached_detector_scores": {
+                    "judge.JailbreakOnlyAdversarial": [1.0, None]
+                },
+            }
+        )
+        assert d.detect(a) == [1.0, None], "the stored verdict is the final verdict"
+        mock_generate.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "cache",
+        [
+            {"judge.JailbreakOnlyAdversarial": [1.0]},  # does not match the outputs
+            {"judge.Jailbreak": [1.0, 1.0]},  # stored for another detector
+        ],
+    )
+    def test_unusable_cache_is_ignored(self, judge_config, mocker, cache):
+        d = garak.detectors.judge.JailbreakOnlyAdversarial(config_root=judge_config)
+        mocker.patch.object(
+            d.evaluation_generator, "generate", return_value=[Message("[[NO]]")]
+        )
+        a = self._attempt({"is_adversarial": True, "cached_detector_scores": cache})
+        assert d.detect(a) == [0.0, 0.0], "the judge scores when no cache applies"
+
+    def test_non_adversarial_ignores_cache(self, judge_config):
+        d = garak.detectors.judge.JailbreakOnlyAdversarial(config_root=judge_config)
+        a = self._attempt(
+            {
+                "is_adversarial": False,
+                "cached_detector_scores": {
+                    "judge.JailbreakOnlyAdversarial": [1.0, 1.0]
+                },
+            }
+        )
+        assert d.detect(a) == [None, None]
