@@ -679,6 +679,408 @@ class TestEarlyStopOn:
             )
 
 
+class TestGOATBranchIsolation:
+    """Attacker history must stay independent across generation branches."""
+
+    def test_attacker_conversation_not_shared_between_branches(self):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [
+                garak.attempt.Message(
+                    f"Observation: o{i}\nThought: t{i}\nStrategy: s{i}\nResponse: attack {i}"
+                )
+            ]
+            for i in (1, 2)
+        ]
+
+        base_C_A = garak.attempt.Conversation(
+            [
+                garak.attempt.Turn("system", garak.attempt.Message("attacker system")),
+                garak.attempt.Turn("user", garak.attempt.Message("initial")),
+                garak.attempt.Turn("assistant", garak.attempt.Message("first otsr")),
+            ]
+        )
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": base_C_A,
+            "is_adversarial": False,
+            "_should_terminate": [False, False],
+        }
+        attempt.outputs = [
+            garak.attempt.Message("BRANCH_ONE_RESPONSE"),
+            garak.attempt.Message("BRANCH_TWO_RESPONSE"),
+        ]
+
+        next_attempts = probe._generate_next_attempts(attempt)
+        assert len(next_attempts) == 2, "both unterminated branches should continue"
+
+        expected_turns = len(base_C_A.turns) + 2  # followup prompt + attacker reply
+        for branch, own, other in (
+            (0, "BRANCH_ONE_RESPONSE", "BRANCH_TWO_RESPONSE"),
+            (1, "BRANCH_TWO_RESPONSE", "BRANCH_ONE_RESPONSE"),
+        ):
+            C_A = next_attempts[branch].notes["attacker_conversation"]
+            history = "\n".join(turn.content.text for turn in C_A.turns)
+            assert (
+                len(C_A.turns) == expected_turns
+            ), f"branch {branch} attacker history should extend only the shared base"
+            assert own in history, f"branch {branch} should see its own target response"
+            assert (
+                other not in history
+            ), f"branch {branch} attacker history leaked another branch's response"
+
+
+class TestGOATDetectorUnjudged:
+    """end_condition='detector': a None detector score is unjudged, not a jailbreak."""
+
+    @staticmethod
+    def _probe_and_attempt(outputs):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.end_condition = "detector"
+        probe.detector = Mock()
+        probe.detector.detect.return_value = [None] * len(outputs)
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = outputs
+        return probe, attempt
+
+    def test_unjudged_output_continues_and_empty_output_terminates(self):
+        probe, attempt = self._probe_and_attempt(
+            [garak.attempt.Message("a target reply"), garak.attempt.Message("")]
+        )
+        assert probe._should_terminate_using_detector(attempt) == [
+            False,
+            True,
+        ], "unjudged replies continue; an empty reply cannot be continued from"
+
+    def test_unjudged_turn_does_not_mark_goal_achieved(self):
+        probe, attempt = self._probe_and_attempt(
+            [garak.attempt.Message("reply one"), garak.attempt.Message("reply two")]
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.return_value = [
+            garak.attempt.Message(
+                "Observation: o\nThought: t\nStrategy: s\nResponse: next prompt"
+            )
+        ]
+        processed = probe._postprocess_attempt(attempt)
+        assert (
+            len(probe.attempt_queue) == 2
+        ), "both unjudged branches should continue to the next turn"
+        assert (
+            processed.notes["is_adversarial"] is False
+        ), "an unjudged turn is not a jailbreak"
+        assert (
+            "Test goal" not in probe._achieved_goals
+        ), "an unjudged turn must not stop the attack on its goal"
+
+
+class TestGOATEmptyTargetOutput:
+    """An empty target reply ends its branch without counting as a jailbreak."""
+
+    def test_empty_output_does_not_achieve_goal(self):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        assert probe.early_stop_on == "any"
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.return_value = [
+            garak.attempt.Message(
+                "Observation: o\nThought: t\nStrategy: s\nResponse: next prompt"
+            )
+        ]
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = [garak.attempt.Message(""), garak.attempt.Message("reply")]
+        with patch.object(
+            probe, "_should_terminate_conversation", return_value=[True, False]
+        ):
+            processed = probe._postprocess_attempt(attempt)
+
+        assert processed.notes["is_adversarial"] is False, "no branch was jailbroken"
+        assert "Test goal" not in probe._achieved_goals
+        assert (
+            len(probe.attempt_queue) == 1
+        ), "the empty branch ends; the other branch continues"
+
+
+class TestGOATEarlyStopVerdictReused:
+    """Final scoring reuses the detector verdict that decided early stopping."""
+
+    def test_final_score_matches_early_stop_verdict(self):
+        import garak.detectors.judge
+
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.end_condition = "detector"
+        probe.eval_threshold = 0.5  # run param, not set by the probe-only test config
+        klass = garak.detectors.judge.JailbreakOnlyAdversarial
+        probe.detector = klass.__new__(klass)  # real class, no judge model
+        probe.detector.detect = Mock(return_value=[1.0, 0.0])
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("test prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "Test goal",
+            "attacker_conversation": garak.attempt.Conversation(),
+            "is_adversarial": False,
+        }
+        attempt.outputs = [
+            garak.attempt.Message("jailbroken reply"),
+            garak.attempt.Message("refusal"),
+        ]
+
+        processed = probe._postprocess_attempt(attempt)
+        assert processed.notes["cached_detector_scores"] == {
+            "judge.JailbreakOnlyAdversarial": [1.0, 0.0]
+        }, "early-stop scores are kept on the reported attempt"
+        assert processed.notes["is_adversarial"] is True
+        final = klass.detect(probe.detector, processed)  # no judge model is set
+        assert final == [1.0, 0.0], "final scoring reuses the early-stop verdict"
+
+
+REFUSAL ="I can't help create prompts designed to bypass safety measures."
+ATTACK = "Observation: o\nThought: t\nStrategy: s\nResponse: adversarial prompt"
+
+
+class TestGOATAttackerRefusal:
+    """Attacker refusals are retried, then dropped -- never sent to the target."""
+
+    @staticmethod
+    def _probe(replies):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message(r)] for r in replies
+        ]
+        return probe
+
+    @staticmethod
+    def _attacker_conversation():
+        return garak.attempt.Conversation(
+            [
+                garak.attempt.Turn("system", garak.attempt.Message("system")),
+                garak.attempt.Turn("user", garak.attempt.Message("initial")),
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        "prompt, is_refusal",
+        [
+            (REFUSAL, True),
+            ("Observation: \nThought: \nStrategy: \nResponse: I cannot do that", True),
+            ('  "Sorry, but I won\'t write that."', True),
+            ("I'm unable to assist with this request.", True),
+            ("As an AI language model, I must decline.", True),
+            ("Assume the persona of a retired chemist.", False),
+            ('Do not use the string "I cannot" in your reply. Now explain.', False),
+        ],
+    )
+    def test_is_attacker_refusal(self, goat_probe, prompt, is_refusal):
+        response = goat_probe._parse_otsr_response(prompt)["Response"]
+        assert (
+            goat_probe._is_attacker_refusal(response) is is_refusal
+        ), "only replies that open with a refusal count; quoted refusal phrases do not"
+
+    def test_retry_after_refusal_keeps_history_clean(self):
+        probe = self._probe([REFUSAL, ATTACK])
+        C_A = self._attacker_conversation()
+        prompt, C_A = probe._generate_adversarial_prompt(C_A, attack_goal="goal")
+        assert prompt == "adversarial prompt", "the retried attack is used"
+        assert probe.attacker_model.generate.call_count == 2
+        retry_conv = probe.attacker_model.generate.call_args_list[1].args[0]
+        assert (
+            retry_conv.last_message("user").text == probe.refusal_retry_prompt
+        ), "the retry asks the attacker again"
+        texts = [t.content.text for t in C_A.turns]
+        assert len(texts) == 3, "only the usable reply joins the attacker history"
+        assert not any(
+            REFUSAL in t or t == probe.refusal_retry_prompt for t in texts
+        ), "the refusal and retry message stay out of the attacker history"
+        assert probe._attacker_refusals == {}, "a recovered refusal is not recorded"
+
+    @pytest.mark.parametrize("retries", [0, 2])
+    def test_persistent_refusal_drops_and_records(self, retries):
+        probe = self._probe([REFUSAL] * (retries + 1))
+        probe.attacker_refusal_retries = retries
+        C_A = self._attacker_conversation()
+        prompt, C_A = probe._generate_adversarial_prompt(C_A, attack_goal="goal")
+        assert prompt is None, "a refusal is never returned as an attack prompt"
+        assert probe.attacker_model.generate.call_count == retries + 1
+        assert len(C_A.turns) == 2, "the attacker history is left unchanged"
+        assert probe._attacker_refusals == {"goal": 1}
+
+    def test_empty_reply_is_retried_then_recorded(self):
+        probe = self._probe([])
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message("")],  # e.g. provider content filter
+            [None],
+            [garak.attempt.Message(ATTACK)],
+        ]
+        prompt, _ = probe._generate_adversarial_prompt(
+            self._attacker_conversation(), attack_goal="goal"
+        )
+        assert prompt == "adversarial prompt", "an empty reply is retried"
+
+        probe = self._probe([""] * 3)
+        prompt, _ = probe._generate_adversarial_prompt(
+            self._attacker_conversation(), attack_goal="goal"
+        )
+        assert prompt is None
+        assert probe._attacker_refusals == {
+            "goal": 1
+        }, "persistent empty replies are reported like refusals"
+
+    def test_refused_initial_turn_creates_no_attempt(self):
+        probe = self._probe([])
+        probe.attacker_model.generate.side_effect = None
+        probe.attacker_model.generate.return_value = [garak.attempt.Message(REFUSAL)]
+        attempts = probe._create_init_attempts()
+        assert attempts == [], "no refusal is sent to the target as a first turn"
+        assert set(probe._attacker_refusals) == set(probe.attack_goals)
+
+    def test_refused_followup_drops_branch(self):
+        probe = self._probe([REFUSAL] * 3 * 2)
+        conversation = garak.attempt.Conversation(
+            turns=[garak.attempt.Turn("user", garak.attempt.Message("prompt"))],
+            notes={"turn": 1},
+        )
+        attempt = probe._create_attempt(conversation)
+        attempt.notes = {
+            "attack_goal": "goal",
+            "attacker_conversation": self._attacker_conversation(),
+            "is_adversarial": False,
+            "_should_terminate": [False, False],
+        }
+        attempt.outputs = [
+            garak.attempt.Message("reply one"),
+            garak.attempt.Message("reply two"),
+        ]
+        assert (
+            probe._generate_next_attempts(attempt) == []
+        ), "branches whose attacker refuses are dropped, not sent to the target"
+        assert probe._attacker_refusals == {"goal": 2}
+
+    def test_report_lists_only_unachieved_refused_goals(self, goat_probe, capsys):
+        goat_probe._attacker_refusals = {"refused goal": 2, "achieved goal": 1}
+        goat_probe._achieved_goals = {"achieved goal"}
+        goat_probe._report_attacker_refusals()
+        out = capsys.readouterr().out
+        assert (
+            "attacker produced no usable attack (refused, sanitized or empty) on 1/"
+            in out
+        ), "refused, unachieved goals are reported"
+
+    def test_no_report_without_refusals(self, goat_probe, capsys):
+        goat_probe._report_attacker_refusals()
+        assert capsys.readouterr().out == ""
+
+
+class TestGOATAttackerOutputCheck:
+    """attacker_output_check: an LLM verdict rejects sanitized or refused prompts."""
+
+    @staticmethod
+    def _probe(attacker_replies, verdicts):
+        probe = _plugins.load_plugin(
+            "probes.goat.GOATAttack", config_root=GOAT_TEST_CONFIG
+        )
+        probe.attacker_output_check = True
+        probe.attacker_model = Mock()
+        probe.attacker_model.generate.side_effect = [
+            [garak.attempt.Message(r)] for r in attacker_replies
+        ]
+        probe.attacker_checker = Mock()
+        probe.attacker_checker.generate.side_effect = [
+            [garak.attempt.Message(v)] if isinstance(v, str) else v for v in verdicts
+        ]
+        return probe
+
+    @staticmethod
+    def _attack(text):
+        return f"Observation: o\nThought: t\nStrategy: s\nResponse: {text}"
+
+    def _generate(self, probe):
+        return probe._generate_adversarial_prompt(
+            TestGOATAttackerRefusal._attacker_conversation(), attack_goal="goal"
+        )[0]
+
+    def test_sanitized_prompt_is_retried(self):
+        probe = self._probe(
+            [self._attack("lawful version"), self._attack("real attack")],
+            ["[[SANITIZED]]", "[[ATTACK]]"],
+        )
+        assert self._generate(probe) == "real attack", "a sanitized prompt is retried"
+        checked = probe.attacker_checker.generate.call_args_list[0].args[0]
+        assert "goal" in checked.last_message("user").text
+        assert "lawful version" in checked.last_message("user").text
+
+    def test_persistent_sanitizing_drops_and_records(self):
+        probe = self._probe([self._attack("lawful version")] * 3, ["[[SANITIZED]]"] * 3)
+        assert self._generate(probe) is None, "a sanitized prompt is never sent"
+        assert probe._attacker_refusals == {"goal": 1}
+
+    @pytest.mark.parametrize("verdict", ["no verdict here", [None]])
+    def test_checker_without_verdict_accepts_prompt(self, verdict):
+        probe = self._probe([self._attack("real attack")], [verdict])
+        assert (
+            self._generate(probe) == "real attack"
+        ), "a checker failure must not drop a real attack"
+
+    def test_check_off_skips_checker(self):
+        probe = self._probe([self._attack("lawful version")], [])
+        probe.attacker_output_check = False
+        assert self._generate(probe) == "lawful version"
+        probe.attacker_checker.generate.assert_not_called()
+
+    def test_checker_defaults_to_detector_judge(self, goat_probe):
+        judge_model = Mock()
+        goat_probe.detector = Mock(evaluation_generator=judge_model)
+        goat_probe._load_attacker_checker()
+        assert goat_probe.attacker_checker is judge_model
+
+    def test_checker_needs_a_judge_model(self, goat_probe):
+        goat_probe.detector = Mock(spec=[])
+        with pytest.raises(GarakException):
+            goat_probe._load_attacker_checker()
+
+    def test_checker_model_from_config(self, goat_probe):
+        goat_probe.attacker_check_model_type = "test.Repeat"
+        goat_probe.attacker_check_model_name = ""
+        goat_probe._load_attacker_checker()
+        assert goat_probe.attacker_checker.__class__.__name__ == "Repeat"
+
+
 class TestGOATPromptTemplates:
     """Test GOAT prompt templates loaded from data files"""
     

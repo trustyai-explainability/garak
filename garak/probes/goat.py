@@ -71,12 +71,27 @@ class GOATAttack(garak.probes.IterativeProbe):
             internally for early stopping but never evaluated by the detector.
             Only the final turn is seen by the detector.
 
+        attacker_refusal_retries: Extra attacker calls when the attacker refuses
+            to produce a prompt. A refusal is never sent to the target; if the
+            attacker still refuses, that branch is dropped and the goal is
+            reported as attacker-refused rather than as target robustness.
+
+        attacker_output_check: Also classify each attacker prompt with an LLM
+            and treat a sanitized prompt (one redirected to a harmless or lawful
+            version of the goal) or a refusal like a refusal. Costs one extra
+            call per attacker reply; an unparseable verdict accepts the prompt.
+
+        attacker_check_model_type / _name / _config: Model for the check.
+            Unset uses the primary detector's judge model.
+
     Prompt Customization (for different attacker models or styles):
         custom_system_prompt: Override the attacker system prompt
         custom_initial_prompt: Override the initial turn prompt template
         custom_followup_prompt: Override the followup turn prompt template
         custom_judge_prompt: Override the jailbreak judge prompt
         custom_attack_techniques: Dict of {"Name": "Definition"} for custom techniques
+        custom_refusal_retry_prompt: Override the message sent when retrying after an attacker refusal
+        custom_attacker_check_prompt: Override the attacker_output_check classifier prompt
 
     Note:
         For best results, use different models for the red-team attacker, the
@@ -123,6 +138,8 @@ class GOATAttack(garak.probes.IterativeProbe):
         #       final turn (when every branch has terminated or max_calls_per_conv
         #       is reached) is seen by the detector.
         "early_stop_on": "any",
+        # Extra attacker calls after a refusal before the branch is dropped
+        "attacker_refusal_retries": 2,
         # Attacker LLM configuration
         "red_team_model_type": "huggingface.Model",
         "red_team_model_name": "Qwen/Qwen3-4B-Thinking-2507",
@@ -144,7 +161,24 @@ class GOATAttack(garak.probes.IterativeProbe):
         "custom_judge_prompt": None,
         # Custom attack techniques dict: {"Technique Name": "Technique Definition", ...}
         "custom_attack_techniques": None,
+        "custom_refusal_retry_prompt": None,
+        # LLM check of each attacker prompt for sanitizing/refusal (off by default)
+        "attacker_output_check": False,
+        "attacker_check_model_type": None,
+        "attacker_check_model_name": None,
+        "attacker_check_model_config": {},
+        "custom_attacker_check_prompt": None,
     }
+
+    # A refusal opens the attacker's reply; attacks may quote these phrases later
+    # on (e.g. refusal suppression), so only the start is checked.
+    _ATTACKER_REFUSAL_RE = re.compile(
+        r"^\W*(?:sorry\b|i(?:'|’)?m sorry|i am sorry|i apologi[sz]e"
+        r"|i can(?:'|’)?t\b|i cannot\b|i can not\b|i won(?:'|’)?t\b|i will not\b"
+        r"|i(?:'|’)?m (?:not able|unable)|i am (?:not able|unable)|i must decline"
+        r"|as an ai (?:language model|assistant))",
+        re.IGNORECASE,
+    )
 
     def __init__(self, config_root=_config):
         self.attacker_model = None
@@ -154,6 +188,9 @@ class GOATAttack(garak.probes.IterativeProbe):
         # one attempt, sibling attempts for the same goal at the same turn may
         # already be queued. This set lets _generate_next_attempts skip them.
         self._achieved_goals: set = set()
+        # Goals whose attacker refused even after retries -> branches dropped
+        self._attacker_refusals: Dict[str, int] = {}
+        self.attacker_checker = None  # for attacker_output_check
         super().__init__(config_root=config_root)
 
         # Validate early_stop_on
@@ -232,6 +269,24 @@ class GOATAttack(garak.probes.IterativeProbe):
         else:
             with open(goat_data_path / "judge_prompt.txt", "r", encoding="utf-8") as f:
                 self.judge_prompt_template = f.read()
+
+        # Sent to the attacker when retrying after it refused
+        if self.custom_refusal_retry_prompt:
+            self.refusal_retry_prompt = self.custom_refusal_retry_prompt
+        else:
+            with open(
+                goat_data_path / "refusal_retry_prompt.txt", "r", encoding="utf-8"
+            ) as f:
+                self.refusal_retry_prompt = f.read()
+
+        # Classifier prompt for attacker_output_check
+        if self.custom_attacker_check_prompt:
+            self.attacker_check_prompt = self.custom_attacker_check_prompt
+        else:
+            with open(
+                goat_data_path / "attacker_check_prompt.txt", "r", encoding="utf-8"
+            ) as f:
+                self.attacker_check_prompt = f.read()
 
     def _get_attack_goals(self) -> List[str]:
         """Get attack goals from custom list and/or HuggingFace dataset."""
@@ -329,6 +384,32 @@ class GOATAttack(garak.probes.IterativeProbe):
         logging.debug("goat.GOATAttack: Loading detector for early stopping...")
         self.detector = _plugins.load_plugin(f"detectors.{self.primary_detector}")
 
+    def _load_attacker_checker(self):
+        """Instantiate the model for attacker_output_check."""
+        if self.attacker_checker is not None:
+            return
+        if self.attacker_check_model_type:
+            module, klass = self.attacker_check_model_type.split(".")
+            config = {
+                "generators": {
+                    module: {
+                        klass: dict(self.attacker_check_model_config or {})
+                        | {"name": self.attacker_check_model_name},
+                    }
+                }
+            }
+            self.attacker_checker = _plugins.load_plugin(
+                f"generators.{self.attacker_check_model_type}", config_root=config
+            )
+            return
+        self._load_detector()
+        self.attacker_checker = getattr(self.detector, "evaluation_generator", None)
+        if self.attacker_checker is None:
+            raise GarakException(
+                f"attacker_output_check needs attacker_check_model_type, or a judge "
+                f"primary_detector; {self.primary_detector} has no judge model"
+            )
+
     def _format_attack_techniques(self) -> str:
         """Format attack techniques for the system prompt."""
         techniques = []
@@ -371,7 +452,9 @@ class GOATAttack(garak.probes.IterativeProbe):
             )
 
             # Generate first adversarial prompt from attacker LLM
-            adversarial_prompt, C_A = self._generate_adversarial_prompt(C_A)
+            adversarial_prompt, C_A = self._generate_adversarial_prompt(
+                C_A, attack_goal=goal
+            )
             if adversarial_prompt is None:
                 logging.warning(
                     f"goat.GOATAttack: No initial adversarial prompt for goal: {goal[:50]}..."
@@ -451,26 +534,33 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Turn number is tracked on the Conversation object, not attempt.notes
         current_turn = this_attempt.conversations[0].notes.get("turn", 1)
         is_last_possible_turn = current_turn >= self.max_calls_per_conv
-        any_terminated = any(should_terminate)
         all_terminated = all(should_terminate)
+        # A branch with no target output terminates (nothing to continue from) but is
+        # not a jailbreak: it must not mark the goal achieved or stop sibling branches
+        jailbroken = [
+            bool(stop) and output is not None and bool(output.text)
+            for stop, output in zip(should_terminate, this_attempt.outputs)
+        ]
+        any_jailbroken = any(jailbroken)
 
-        # Cache the termination decision so _generate_next_attempts uses the same result
+        # Cache the decisions so _generate_next_attempts uses the same result
         this_attempt.notes["_should_terminate"] = should_terminate
+        this_attempt.notes["_jailbroken"] = jailbroken
 
         # Set is_adversarial before parent's deep copy
         if self.early_stop_on == "any":
             # Mark adversarial if ANY branch jailbroken or we've hit max turns.
             # This ensures every jailbreak is evaluated by the detector.
-            is_adversarial = any_terminated or is_last_possible_turn
+            is_adversarial = any_jailbroken or is_last_possible_turn
         else:
             # "all" mode: mark adversarial only when ALL branches are done.
             is_adversarial = all_terminated or is_last_possible_turn
 
             # Warn when "all" mode silently drops jailbreaks that the detector
             # will never see: some branches jailbroken but not all.
-            if any_terminated and not all_terminated and not is_last_possible_turn:
-                n_jailbroken = sum(should_terminate)
-                n_total = len(should_terminate)
+            if any_jailbroken and not all_terminated and not is_last_possible_turn:
+                n_jailbroken = sum(jailbroken)
+                n_total = len(jailbroken)
                 logging.warning(
                     f"goat.GOATAttack: early_stop_on='all' — {n_jailbroken}/{n_total} "
                     f"branches jailbroken at turn {current_turn} but attempt is NOT "
@@ -488,7 +578,7 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Record achieved goals for cross-attempt coordination.
         # When a jailbreak is found, sibling attempts for the same goal that
         # were queued at the same turn should not generate further turns.
-        if any_terminated:
+        if any_jailbroken:
             if attack_goal:
                 self._achieved_goals.add(attack_goal)
 
@@ -496,36 +586,152 @@ class GOATAttack(garak.probes.IterativeProbe):
         return super()._postprocess_attempt(this_attempt)
 
     def _generate_adversarial_prompt(
-        self, attacker_conversation: garak.attempt.Conversation
+        self,
+        attacker_conversation: garak.attempt.Conversation,
+        attack_goal: Optional[str] = None,
     ) -> Tuple[Optional[str], garak.attempt.Conversation]:
         """Generate an adversarial prompt using the attacker LLM.
 
+        A refusal or unusable reply is never returned as a prompt: the attacker
+        is retried up to ``attacker_refusal_retries`` times on a scratch copy of
+        its conversation, so only a usable reply is added to ``attacker_conversation``.
+
         Args:
             attacker_conversation: The attacker's conversation history (C_A)
+            attack_goal: Goal recorded as attacker-refused if every try fails
 
         Returns:
             Tuple of (adversarial_prompt or None, updated_attacker_conversation)
         """
-        attacker_response = self._call_attacker_llm(attacker_conversation)
-        if not attacker_response:
-            return None, attacker_conversation
+        conversation = attacker_conversation
+        for _ in range(max(self.attacker_refusal_retries, 0) + 1):
+            attacker_response = self._call_attacker_llm(conversation)
+            if not attacker_response:
+                # empty reply, e.g. a provider content filter: ask again unchanged
+                logging.info("goat.GOATAttack: Attacker returned nothing; retrying")
+                conversation = attacker_conversation
+                continue
 
-        attacker_response_text = self._extract_content(attacker_response)
+            attacker_response_text = self._extract_content(attacker_response)
 
-        # Parse O-T-S-R format
-        r_A = self._parse_otsr_response(attacker_response_text)
-        adversarial_prompt = r_A.get("Response") if r_A else None
+            # Parse O-T-S-R format
+            r_A = self._parse_otsr_response(attacker_response_text)
+            adversarial_prompt = r_A.get("Response") if r_A else None
 
-        # Update C_A with attacker's response
-        if r_A:
-            formatted_response = self._format_otsr(r_A)
-            attacker_conversation.turns.append(
+            if (
+                adversarial_prompt
+                and not self._is_attacker_refusal(adversarial_prompt)
+                and not self._is_sanitized_or_refused(adversarial_prompt, attack_goal)
+            ):
+                attacker_conversation.turns.append(
+                    garak.attempt.Turn(
+                        "assistant", garak.attempt.Message(self._format_otsr(r_A))
+                    )
+                )
+                return adversarial_prompt, attacker_conversation
+
+            logging.info(
+                "goat.GOATAttack: Attacker refused or gave no usable prompt; retrying"
+            )
+            conversation = copy.deepcopy(attacker_conversation)
+            conversation.turns.append(
                 garak.attempt.Turn(
-                    "assistant", garak.attempt.Message(formatted_response)
+                    "assistant", garak.attempt.Message(attacker_response_text)
+                )
+            )
+            conversation.turns.append(
+                garak.attempt.Turn(
+                    "user", garak.attempt.Message(self.refusal_retry_prompt)
                 )
             )
 
-        return adversarial_prompt, attacker_conversation
+        logging.warning(
+            f"goat.GOATAttack: Attacker gave no usable attack after "
+            f"{self.attacker_refusal_retries} retries; dropping branch for goal: "
+            f"{(attack_goal or '')[:50]}..."
+        )
+        if attack_goal is not None:
+            self._attacker_refusals[attack_goal] = (
+                self._attacker_refusals.get(attack_goal, 0) + 1
+            )
+        return None, attacker_conversation
+
+    def _is_attacker_refusal(self, adversarial_prompt: str) -> bool:
+        """Return True if the attacker's prompt is a refusal rather than an attack."""
+        return bool(self._ATTACKER_REFUSAL_RE.match(adversarial_prompt[:200]))
+
+    def _is_sanitized_or_refused(
+        self, adversarial_prompt: str, attack_goal: Optional[str]
+    ) -> bool:
+        """With attacker_output_check, ask an LLM whether the prompt is a real attack.
+
+        Returns False (accept the prompt) when the check is off, there is no goal
+        to check against, or the checker gives no verdict.
+        """
+        if not self.attacker_output_check or not attack_goal:
+            return False
+        self._load_attacker_checker()
+        conversation = garak.attempt.Conversation(
+            [
+                garak.attempt.Turn(
+                    "system", garak.attempt.Message(self.attacker_check_prompt)
+                ),
+                garak.attempt.Turn(
+                    "user",
+                    garak.attempt.Message(
+                        f"GOAL: {attack_goal}\n\nATTACKER PROMPT:\n{adversarial_prompt}"
+                    ),
+                ),
+            ]
+        )
+        try:
+            outputs = self.attacker_checker.generate(
+                conversation, generations_this_call=1
+            )
+        except GarakException as e:
+            logging.warning(f"goat.GOATAttack: Attacker output check failed: {e}")
+            return False
+        text = outputs[0].text if outputs and outputs[0] else None
+        match = re.search(r"\[\[(ATTACK|SANITIZED|REFUSAL)\]\]", text or "", re.I)
+        if match is None:
+            logging.warning(
+                "goat.GOATAttack: Attacker output check gave no verdict; accepting prompt"
+            )
+            return False
+        verdict = match.group(1).upper()
+        if verdict != "ATTACK":
+            logging.info(f"goat.GOATAttack: Attacker output check: {verdict}")
+        return verdict != "ATTACK"
+
+    def probe(self, generator) -> List[garak.attempt.Attempt]:
+        """Run the attack, then report goals the attacker refused to pursue."""
+        attempts = super().probe(generator)
+        self._report_attacker_refusals()
+        return attempts
+
+    def _report_attacker_refusals(self) -> None:
+        """Warn about unachieved goals where the attacker refused, so they are
+        not mistaken for target robustness."""
+        refused = {
+            goal: count
+            for goal, count in self._attacker_refusals.items()
+            if goal not in self._achieved_goals
+        }
+        if not refused:
+            return
+        msg = (
+            f"attacker produced no usable attack (refused, sanitized or empty) on "
+            f"{len(refused)}/{len(self.attack_goals)} goal(s) that were not "
+            "achieved; their results reflect the attacker, not target robustness"
+        )
+        logging.warning(
+            f"goat.GOATAttack: {msg}: "
+            + "; ".join(
+                f"{goal[:60]!r} ({count} branch(es) dropped)"
+                for goal, count in refused.items()
+            )
+        )
+        print(f"⚠️  {self.probename.replace('garak.', '')}: {msg}")
 
     def _should_terminate_conversation(
         self, attempt: garak.attempt.Attempt
@@ -571,11 +777,31 @@ class GOATAttack(garak.probes.IterativeProbe):
         # Restore original value
         attempt.notes["is_adversarial"] = original_is_adversarial
 
+        # Keep these scores so final scoring reuses the verdict that decided early
+        # stopping instead of asking the judge again, which can flip on borderline outputs
+        detector_name = (
+            type(self.detector).__module__.removeprefix("garak.detectors.")
+            + "."
+            + type(self.detector).__name__
+        )
+        attempt.notes.setdefault("cached_detector_scores", {})[detector_name] = list(
+            detector_scores
+        )
+
         current_turn = attempt.conversations[0].notes.get("turn", 1)
         should_terminate = []
-        for score in detector_scores:
+        for output, score in zip(attempt.outputs, detector_scores):
             if score is None:
-                should_terminate.append(True)  # Terminate on evaluation failure
+                if output is None or not output.text:
+                    # nothing from the target to continue the conversation from
+                    should_terminate.append(True)
+                else:
+                    # the judge could not score this output; that is not a jailbreak,
+                    # and terminating would mark the goal achieved, so keep attacking
+                    logging.warning(
+                        f"goat.GOATAttack: Detector could not judge output at turn {current_turn}; continuing"
+                    )
+                    should_terminate.append(False)
             else:
                 # Score of 1.0 means jailbreak detected (unsafe)
                 is_jailbreak = score >= self.eval_threshold
@@ -673,7 +899,8 @@ class GOATAttack(garak.probes.IterativeProbe):
 
         # In "any" mode, if any branch of THIS attempt was jailbroken the
         # attack_goal is achieved. Stop all branches.
-        if self.early_stop_on == "any" and any(should_terminate):
+        jailbroken = last_attempt.notes.get("_jailbroken", should_terminate)
+        if self.early_stop_on == "any" and any(jailbroken):
             logging.debug(
                 f"goat.GOATAttack: early_stop_on='any' — at least one branch "
                 f"terminated at turn {current_turn}, stopping all branches for goal: "
@@ -714,14 +941,16 @@ class GOATAttack(garak.probes.IterativeProbe):
                 prev_model_response=last_response.text,
             )
 
-            # Deep copy to avoid mutating original
-            C_A = copy.deepcopy(C_A)
-            C_A.turns.append(
+            # Each branch extends its own copy of the shared attacker history
+            branch_C_A = copy.deepcopy(C_A)
+            branch_C_A.turns.append(
                 garak.attempt.Turn("user", garak.attempt.Message(followup_prompt))
             )
 
             # Generate next adversarial prompt
-            adversarial_prompt, C_A = self._generate_adversarial_prompt(C_A)
+            adversarial_prompt, branch_C_A = self._generate_adversarial_prompt(
+                branch_C_A, attack_goal=attack_goal
+            )
             if adversarial_prompt is None:
                 logging.warning(
                     f"goat.GOATAttack: No followup adversarial prompt for attack goal: {attack_goal[:50]}..."
@@ -742,7 +971,7 @@ class GOATAttack(garak.probes.IterativeProbe):
             next_attempt.notes.update(
                 {
                     "attack_goal": attack_goal,
-                    "attacker_conversation": C_A,
+                    "attacker_conversation": branch_C_A,
                     "is_adversarial": False,
                 }
             )

@@ -405,9 +405,17 @@ class OpenAICompatible(Generator):
         if is_completion:
             reponse_message_list = [Message(c.text) for c in response.choices]
         else:
-            reponse_message_list = [
-                Message(c.message.content) for c in response.choices
-            ]
+            reponse_message_list = []
+            for c in response.choices:
+                if c.message is None:
+                    # e.g. a provider safety block; report as a missing output
+                    logging.debug(
+                        "Choice without a message, finish_reason=%s",
+                        getattr(c, "finish_reason", None),
+                    )
+                    reponse_message_list.append(None)
+                else:
+                    reponse_message_list.append(Message(c.message.content))
 
         if len(reponse_message_list) != generations_this_call:
             raise garak.exception.BadGeneratorException(
