@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# flit-scm generated version file
+garak/_version.py
+
 # C extensions
 *.so
 

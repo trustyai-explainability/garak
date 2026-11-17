@@ -485,6 +485,16 @@ def test_cli_overrides_run_yaml():
         ), "CLI-specificd config values should override values in config file names on CLI"
 
 
+def test_run_yaml_selects_harness():
+    with tempfile.NamedTemporaryFile(buffering=0, delete=False, suffix=".yaml") as tmp:
+        tmp.write(b"---\nrun:\n  harness: earlystop\n")
+        tmp.close()
+        garak.cli.main(["--config", tmp.name, "--list_config"])
+        os.remove(tmp.name)
+
+    assert _config.run.harness == "earlystop", "run.harness must select EarlyStop"
+
+
 # test probe_options YAML
 # more refactor for namespace keys
 def test_probe_options_yaml(capsys):

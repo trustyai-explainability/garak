@@ -8,7 +8,7 @@ presidio-analyzer>=2.2.0,<3.0.0
 spacy>=3.7.0,<4.0.0
 
 # HuggingFace datasets - Streaming access to training datasets
-datasets>=2.14.0,<4.0.0
+datasets>=4.0
 
 # HuggingFace Hub - Authentication and dataset access
 huggingface_hub>=1.0

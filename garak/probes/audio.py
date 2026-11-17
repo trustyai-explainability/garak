@@ -8,6 +8,7 @@ Probes designed to test audio-to-text models and the audio component of multimod
 This module is for audio-modality probes only.
 """
 
+import io
 import logging
 from typing import Iterable
 
@@ -59,8 +60,8 @@ class AudioAchillesHeel(garak.probes.Probe):
             from pathlib import Path
 
             audio_achilles_data_dir = Path(data_path) / "audio_achilles"
-            audio_achilles_data_dir.mkdir(mode=0o740, parents=True, exist_ok=True)
 
+        audio_achilles_data_dir.mkdir(mode=0o740, parents=True, exist_ok=True)
         if len(list(audio_achilles_data_dir.glob("*"))) < 1:
             logging.debug(
                 "Audio Achilles data not found. Downloading from HuggingFace."
@@ -68,16 +69,28 @@ class AudioAchillesHeel(garak.probes.Probe):
 
             from datasets import Audio, load_dataset
 
+            def write_audio_to_file(audio_data, file_path, sampling_rate):
+                """Writes audio data to a file.
+
+                Args:
+                    audio_data: A 1D numpy array containing the audio data.
+                    file_path: The path to the output audio file.
+                    sampling_rate: The sampling rate of the audio data.
+                """
+                self.soundfile.write(file_path, audio_data, sampling_rate)
+
             dataset = load_dataset("garak-llm/audio_achilles_heel")
-            # Take the original file bytes without decoding: datasets >= 4
-            # decodes audio via torchcodec, which is not needed here since
-            # files are written straight to disk. Behaves the same on
-            # datasets 3, 4 and 5.
-            train = dataset["train"].cast_column("audio", Audio(decode=False))
-            for item in train:
-                file_path = str(audio_achilles_data_dir) + f"/{item['audio']['path']}"
-                with open(file_path, "wb") as audio_file:
-                    audio_file.write(item["audio"]["bytes"])
+            dataset = dataset.cast_column("audio", Audio(decode=False))
+            for item in dataset["train"]:
+                audio = item["audio"]
+                audio_source = (
+                    io.BytesIO(audio["bytes"])
+                    if audio["bytes"] is not None
+                    else audio["path"]
+                )
+                audio_data, sampling_rate = self.soundfile.read(audio_source)
+                file_path = str(audio_achilles_data_dir) + f"/{audio['path']}"
+                write_audio_to_file(audio_data, file_path, sampling_rate)
 
         filenames = [
             str(filename.resolve())

@@ -228,6 +228,12 @@ def test_spec_short_flag_matches_long(capsys):
     }, f"-S must alias --spec; got {short_spec!r} vs {long_spec!r}"
 
 
+def test_harness_option_selects_earlystop(capsys):
+    """The CLI harness option must persist the explicit EarlyStop selection."""
+    cli.main(["--harness", "earlystop", "--list_config"])
+    assert _config.run.harness == "earlystop"
+
+
 def test_spec_unquoted_multiple_selectors(capsys):
     """A comma-separated --spec needs no shell quoting: a single unquoted
     token (no spaces) must parse into multiple selectors."""
