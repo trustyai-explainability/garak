@@ -21,7 +21,7 @@ import backoff
 from garak import _config
 from garak.attempt import Message, Conversation
 import garak.exception
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 MODEL_ALIASES = {
     "claude-4-5-haiku": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -193,6 +193,7 @@ class BedrockGenerator(Generator):
         backoff.fibo,
         garak.exception.GeneratorBackoffTrigger,
         max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1

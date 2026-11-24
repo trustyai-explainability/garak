@@ -17,7 +17,7 @@ import backoff
 from garak import _config
 from garak.attempt import Message, Conversation
 from garak.exception import GeneratorBackoffTrigger
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 
 class ReplicateGenerator(Generator):
@@ -53,7 +53,9 @@ class ReplicateGenerator(Generator):
     def _load_unsafe(self):
         self.client = self.replicate
 
-    @backoff.on_exception(backoff.fibo, GeneratorBackoffTrigger, max_value=70)
+    @backoff.on_exception(
+        backoff.fibo, GeneratorBackoffTrigger, max_value=70, on_backoff=retry_budget
+    )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1
     ) -> List[Union[Message, None]]:
@@ -88,7 +90,9 @@ class InferenceEndpoint(ReplicateGenerator):
     Expects `name` in the format of `username/deployed-model-name`.
     """
 
-    @backoff.on_exception(backoff.fibo, GeneratorBackoffTrigger, max_value=70)
+    @backoff.on_exception(
+        backoff.fibo, GeneratorBackoffTrigger, max_value=70, on_backoff=retry_budget
+    )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1
     ) -> List[Union[Message, None]]:

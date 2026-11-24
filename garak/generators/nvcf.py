@@ -14,7 +14,7 @@ import requests
 from garak import _config
 from garak.attempt import Message, Conversation
 from garak.exception import TargetNameMissingError, BadGeneratorException
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 
 class NvcfChat(Generator):
@@ -106,6 +106,7 @@ class NvcfChat(Generator):
             requests.exceptions.ConnectionError,
         ),
         max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1

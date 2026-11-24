@@ -25,7 +25,7 @@ from garak.exception import (
     RateLimitHit,
     GeneratorBackoffTrigger,
 )
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 
 class RestGenerator(Generator):
@@ -73,6 +73,7 @@ class RestGenerator(Generator):
         "ratelimit_codes",
         "skip_codes",
         "skip_seq_start",
+        "max_retry_seconds",
         "skip_seq_end",
         "temperature",
         "top_k",
@@ -210,7 +211,7 @@ class RestGenerator(Generator):
                     ssl_ctx.check_hostname = False
                     ssl_ctx.verify_mode = ssl.CERT_NONE
             # re-read passphrase from env var if cleared or missing
-            # may be lost during pickle roundtrip 
+            # may be lost during pickle roundtrip
             passphrase = self.client_key_passphrase
             if passphrase is None and self.client_key_passphrase_env_var is not None:
                 passphrase = os.getenv(self.client_key_passphrase_env_var)
@@ -296,7 +297,10 @@ class RestGenerator(Generator):
         return [None]
 
     @backoff.on_exception(
-        backoff.fibo, (RateLimitHit, GeneratorBackoffTrigger), max_value=70
+        backoff.fibo,
+        (RateLimitHit, GeneratorBackoffTrigger),
+        max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1

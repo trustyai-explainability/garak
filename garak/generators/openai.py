@@ -24,7 +24,7 @@ import backoff
 from garak import _config
 from garak.attempt import Message, Conversation
 import garak.exception
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 # lists derived from https://platform.openai.com/docs/models
 chat_models = (
@@ -291,6 +291,7 @@ class OpenAICompatible(Generator):
             garak.exception.GeneratorBackoffTrigger,
         ),
         max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1
@@ -563,6 +564,7 @@ class OpenAIResponsesGenerator(OpenAICompatible):
             garak.exception.GeneratorBackoffTrigger,
         ),
         max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Union[Conversation, List[dict]], generations_this_call: int = 1

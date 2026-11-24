@@ -25,7 +25,7 @@ from typing import List, Union
 from garak import _config
 from garak.attempt import Message, Conversation
 from garak.exception import GeneratorBackoffTrigger, BadGeneratorException
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 
 class LLMGenerator(Generator):
@@ -76,7 +76,9 @@ class LLMGenerator(Generator):
             return set(options_cls.model_fields.keys()) - self.suppressed_params
         return set()
 
-    @backoff.on_exception(backoff.fibo, GeneratorBackoffTrigger, max_value=70)
+    @backoff.on_exception(
+        backoff.fibo, GeneratorBackoffTrigger, max_value=70, on_backoff=retry_budget
+    )
     def _call_single(
         self, text_prompt: str, system_text: Union[str, None], prompt_kwargs: dict
     ) -> Union[Message, None]:

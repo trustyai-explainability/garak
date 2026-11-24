@@ -8,7 +8,7 @@ import backoff
 from garak import _config
 from garak.attempt import Message, Conversation
 from garak.exception import GeneratorBackoffTrigger, APIKeyMissingError
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 from httpx import TimeoutException
 
 
@@ -115,6 +115,7 @@ class OllamaGenerator(Generator):
         GeneratorBackoffTrigger,
         max_value=70,
         giveup=_give_up,
+        on_backoff=retry_budget,
     )
     @backoff.on_predicate(
         backoff.fibo,
@@ -161,6 +162,7 @@ class OllamaGeneratorChat(OllamaGenerator):
         GeneratorBackoffTrigger,
         max_value=70,
         giveup=_give_up,
+        on_backoff=retry_budget,
     )
     @backoff.on_predicate(
         backoff.fibo,
