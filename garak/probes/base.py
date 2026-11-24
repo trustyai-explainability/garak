@@ -343,6 +343,7 @@ class Probe(Configurable):
             )
 
             attempt_pool = None
+            all_attempted = False
             try:
                 attempt_pool = Pool(pool_size)
                 for result in attempt_pool.imap_unordered(
@@ -359,6 +360,7 @@ class Probe(Configurable):
                         processed_attempt
                     )  # these can be out of original order
                     attempt_bar.update(1)
+                all_attempted = True
             except OSError as o:
                 if o.errno == 24:
                     msg = "Parallelisation limit hit. Try reducing parallel_attempts or raising limit (e.g. ulimit -n 4096)"
@@ -368,6 +370,11 @@ class Probe(Configurable):
                     raise (o)
             finally:
                 if attempt_pool is not None:
+                    if not all_attempted:
+                        # Something failed (e.g. a generator gave up after its
+                        # max_retry_seconds): stop the queued attempts instead of
+                        # letting close() + join() wait for all of them to finish.
+                        attempt_pool.terminate()
                     attempt_pool.close()
                     attempt_pool.join()
 

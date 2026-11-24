@@ -18,6 +18,72 @@ from garak.exception import BadGeneratorException, GarakException
 import garak.resources.theme
 
 
+def _redact_uri(uri: str) -> str:
+    """Drop credentials and the query string from a URI before it goes in a message."""
+    uri = str(uri).split("?", 1)[0]
+    scheme, sep, rest = uri.partition("://")
+    host, slash, path = rest.partition("/")
+    if sep and "@" in host:
+        host = host.rsplit("@", 1)[1]
+    return f"{scheme}{sep}{host}{slash}{path}" if sep else uri
+
+
+def _describe_retry_error(exception: BaseException | None) -> str:
+    """Short description of the error that triggered a retry, e.g. ``HTTP 503 (...)``."""
+    if exception is None:
+        return "unknown error"
+    # Generators raise GeneratorBackoffTrigger from the underlying client error.
+    cause = exception.__cause__ or exception
+    status = getattr(cause, "status_code", None)
+    if status is None:
+        status = getattr(getattr(cause, "response", None), "status_code", None)
+    text = str(cause).strip().splitlines()[0][:200] if str(cause).strip() else ""
+    name = type(cause).__name__
+    if status is not None:
+        return f"HTTP {status} ({name}{': ' + text if text else ''})"
+    return f"{name}{': ' + text if text else ''}"
+
+
+def retry_budget(details: dict) -> None:
+    """``backoff`` ``on_backoff`` handler that bounds how long a request is retried.
+
+    Generators retry transient failures (rate limits, 5xx responses, timeouts) with
+    ``@backoff.on_exception``, which on its own retries forever: a target that stays
+    down keeps a run going indefinitely. Attach this handler to those decorators
+    (``on_backoff=retry_budget``). When a request has been failing for the
+    generator's ``max_retry_seconds`` by the end of the next wait, it raises
+    ``GarakException``, which aborts the run instead of letting it hang.
+
+    The budget is per request: a request that succeeds before it runs out simply
+    returns, and the next request starts a new clock. backoff measures elapsed time
+    from the start of the first try to the start of the latest one, so a request
+    whose tries are slow to fail (e.g. timeouts) can run up to one try longer.
+    """
+    args = details.get("args") or ()
+    generator = args[0] if args else None
+    budget = getattr(generator, "max_retry_seconds", None)
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+        return
+    elapsed = details.get("elapsed") or 0.0
+    if elapsed + (details.get("wait") or 0.0) < budget:
+        return
+
+    name = getattr(generator, "fullname", None) or type(generator).__name__
+    uri = getattr(generator, "uri", None)
+    where = f" at {_redact_uri(uri)}" if uri else ""
+    msg = (
+        f"Giving up on {name}{where}: requests kept failing for {elapsed:.0f}s "
+        f"({details.get('tries', '?')} tries; last error: "
+        f"{_describe_retry_error(details.get('exception'))}), and retrying again "
+        f"would exceed max_retry_seconds={budget:g}. Raise max_retry_seconds in the "
+        "generator config, or set it to 0 to retry indefinitely."
+    )
+    logging.error(msg)
+    # Raised from None: the client exception may not be picklable, and this has to
+    # cross multiprocessing.Pool boundaries (see the 401 handling in openai.py).
+    raise GarakException(msg) from None
+
+
 class Generator(Configurable):
     """Base class for objects that wrap an LLM or other text-to-text service"""
 
@@ -29,6 +95,9 @@ class Generator(Configurable):
         "context_len": None,
         "skip_seq_start": None,
         "skip_seq_end": None,
+        # Stop retrying a failing request after this many seconds and abort the run;
+        # 0 or None means retry indefinitely. See retry_budget().
+        "max_retry_seconds": 1800,
     }
 
     _run_params = {"deprefix", "seed"}
@@ -196,6 +265,7 @@ class Generator(Configurable):
                 )
 
                 pool = None
+                all_generated = False
                 try:
                     pool = Pool(pool_size)
                     for result in pool.imap_unordered(
@@ -204,6 +274,7 @@ class Generator(Configurable):
                         self._verify_target_result(result)
                         outputs.append(result[0])
                         multi_generator_bar.update(1)
+                    all_generated = True
                 except OSError as o:
                     if o.errno == 24:
                         msg = "Parallelisation limit hit. Try reducing parallel_requests or raising limit (e.g. ulimit -n 4096)"
@@ -213,6 +284,11 @@ class Generator(Configurable):
                         raise (o)
                 finally:
                     if pool is not None:
+                        if not all_generated:
+                            # Something failed (e.g. a generator gave up after its
+                            # max_retry_seconds): stop the queued work instead of
+                            # letting close() + join() wait for all of it to finish.
+                            pool.terminate()
                         pool.close()
                         pool.join()
 

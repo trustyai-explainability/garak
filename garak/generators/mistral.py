@@ -8,7 +8,7 @@ import backoff
 from garak import _config
 from garak.attempt import Conversation, Message
 from garak.exception import BadGeneratorException, GeneratorBackoffTrigger, RateLimitHit
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 
 class MistralGenerator(Generator):
@@ -36,7 +36,10 @@ class MistralGenerator(Generator):
         self._load_unsafe()
 
     @backoff.on_exception(
-        backoff.fibo, (GeneratorBackoffTrigger, RateLimitHit), max_value=70
+        backoff.fibo,
+        (GeneratorBackoffTrigger, RateLimitHit),
+        max_value=70,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call=1

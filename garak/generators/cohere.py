@@ -21,7 +21,7 @@ import tqdm
 from garak import _config
 from garak.attempt import Message, Conversation
 from garak.exception import GeneratorBackoffTrigger
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 
 COHERE_GENERATION_LIMIT = (
     5  # c.f. https://docs.cohere.com/reference/generate 18 may 2023
@@ -78,7 +78,9 @@ class CohereGenerator(Generator):
         else:  # api_version == "v2"
             self.generator = self.cohere.ClientV2(api_key=self.api_key)
 
-    @backoff.on_exception(backoff.fibo, GeneratorBackoffTrigger, max_value=70)
+    @backoff.on_exception(
+        backoff.fibo, GeneratorBackoffTrigger, max_value=70, on_backoff=retry_budget
+    )
     def _call_cohere_api(self, prompt_text, request_size=COHERE_GENERATION_LIMIT):
         """Empty prompts raise API errors (e.g. invalid request: prompt must be at least 1 token long).
         We catch these using the ApiError base class in Cohere v5+.

@@ -205,11 +205,16 @@ The ``backoff`` module offers a decorator that controls behaviour in response to
 .. code-block:: python
 
         @backoff.on_exception(
-            backoff.fibo, replicate.exceptions.ReplicateError, max_value=70
+            backoff.fibo,
+            replicate.exceptions.ReplicateError,
+            max_value=70,
+            on_backoff=retry_budget,
         )
         def _call_model(self, prompt: Conversation, generations_this_call: int = 1):
 
 The ``max_value`` param means to never wait more than 70 seconds. API modules like Replicate's often use the ``logging`` module to give more detailed info, which is stored in ``garak.log``, if one wants to troubleshoot.
+
+On its own, ``backoff.on_exception`` retries forever, so a model that stays down would keep the run going indefinitely. ``on_backoff=retry_budget`` (imported from ``garak.generators.base``) bounds that: when a request has been failing for the generator's ``max_retry_seconds`` (a parameter every generator inherits, default 1800 seconds), it raises ``GarakException`` and the run aborts with a message naming the generator, its endpoint and the last error. Users can raise ``max_retry_seconds`` in the generator config, or set it to ``0`` to retry indefinitely. Every ``backoff.on_exception`` in a generator should include it; a test checks this.
 
 One housekeeping point: because we lazy-import ``replicate``, the requested backoff exception ``replicate.exceptions.ReplicateError`` doesn't exist at compile time, and looks like a syntax error to Python. So, we need to add one top-level import to the module:
 

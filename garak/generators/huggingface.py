@@ -29,7 +29,7 @@ from garak.exception import (
     GarakException,
     BadGeneratorException,
 )
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 from garak.resources.api.huggingface import HFCompatible
 
 models_to_deprefix = ["gpt2"]
@@ -224,6 +224,7 @@ class InferenceAPI(Generator):
             TimeoutError,
         ),
         max_value=125,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1
@@ -341,6 +342,7 @@ class InferenceEndpoint(InferenceAPI):
             requests.Timeout,
         ),
         max_value=125,
+        on_backoff=retry_budget,
     )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1

@@ -7,7 +7,7 @@ import backoff
 
 from garak import _config
 from garak.exception import GeneratorBackoffTrigger
-from garak.generators.base import Generator
+from garak.generators.base import Generator, retry_budget
 from garak.attempt import Message, Conversation
 
 
@@ -61,7 +61,9 @@ class AnthropicGenerator(Generator):
         system = "\n\n".join(system_parts) if system_parts else None
         return system, messages
 
-    @backoff.on_exception(backoff.fibo, GeneratorBackoffTrigger, max_value=70)
+    @backoff.on_exception(
+        backoff.fibo, GeneratorBackoffTrigger, max_value=70, on_backoff=retry_budget
+    )
     def _call_model(
         self, prompt: Conversation, generations_this_call: int = 1
     ) -> List[Message | None]:

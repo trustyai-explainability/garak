@@ -192,6 +192,10 @@ class TAP(garak.probes.Probe):
                 keep_last_n=self.keep_last_n,
                 pruning=self.pruning,
             )
+        except GarakException:
+            # Run-level failures (e.g. a model that stayed down past its
+            # max_retry_seconds) must abort the run, not just this probe.
+            raise
         except Exception as e:
             logging.error(e)
             print(f"TAP generation encountered an error:\n{e}")
@@ -224,6 +228,7 @@ class TAP(garak.probes.Probe):
                 attempt_bar.set_description(self.probename.replace("garak.", ""))
 
                 attempt_pool = None
+                all_attempted = False
                 try:
                     attempt_pool = Pool(self.parallel_attempts)
                     for result in attempt_pool.imap_unordered(
@@ -233,8 +238,14 @@ class TAP(garak.probes.Probe):
                             result
                         )  # these will be out of original order
                         attempt_bar.update(1)
+                    all_attempted = True
                 finally:
                     if attempt_pool is not None:
+                        if not all_attempted:
+                            # Something failed (e.g. a generator gave up after its
+                            # max_retry_seconds): stop the queued attempts instead of
+                            # letting close() + join() wait for all of them to finish.
+                            attempt_pool.terminate()
                         attempt_pool.close()
                         attempt_pool.join()
 
@@ -330,6 +341,10 @@ class PAIR(garak.probes.Probe):
                 keep_last_n=self.keep_last_n,
                 pruning=self.pruning,
             )
+        except GarakException:
+            # Run-level failures (e.g. a model that stayed down past its
+            # max_retry_seconds) must abort the run, not just this probe.
+            raise
         except Exception as e:
             logging.error(e)
             print(f"PAIR generation encountered an error:\n{e}")
@@ -362,6 +377,7 @@ class PAIR(garak.probes.Probe):
                 attempt_bar.set_description(self.probename.replace("garak.", ""))
 
                 attempt_pool = None
+                all_attempted = False
                 try:
                     attempt_pool = Pool(self.parallel_attempts)
                     for result in attempt_pool.imap_unordered(
@@ -371,8 +387,14 @@ class PAIR(garak.probes.Probe):
                             result
                         )  # these will be out of original order
                         attempt_bar.update(1)
+                    all_attempted = True
                 finally:
                     if attempt_pool is not None:
+                        if not all_attempted:
+                            # Something failed (e.g. a generator gave up after its
+                            # max_retry_seconds): stop the queued attempts instead of
+                            # letting close() + join() wait for all of them to finish.
+                            attempt_pool.terminate()
                         attempt_pool.close()
                         attempt_pool.join()
 
