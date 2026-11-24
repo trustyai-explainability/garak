@@ -265,6 +265,7 @@ class Generator(Configurable):
                 )
 
                 pool = None
+                all_generated = False
                 try:
                     pool = Pool(pool_size)
                     for result in pool.imap_unordered(
@@ -273,6 +274,7 @@ class Generator(Configurable):
                         self._verify_target_result(result)
                         outputs.append(result[0])
                         multi_generator_bar.update(1)
+                    all_generated = True
                 except OSError as o:
                     if o.errno == 24:
                         msg = "Parallelisation limit hit. Try reducing parallel_requests or raising limit (e.g. ulimit -n 4096)"
@@ -282,6 +284,11 @@ class Generator(Configurable):
                         raise (o)
                 finally:
                     if pool is not None:
+                        if not all_generated:
+                            # Something failed (e.g. a generator gave up after its
+                            # max_retry_seconds): stop the queued work instead of
+                            # letting close() + join() wait for all of it to finish.
+                            pool.terminate()
                         pool.close()
                         pool.join()
 
